@@ -222,6 +222,9 @@ function migrate(db: DB) {
   add('company', 'allow_negative_stock', 'INTEGER NOT NULL DEFAULT 0');
   add('company', 'last_backup', "TEXT NOT NULL DEFAULT ''");
   add('vouchers', 'client_key', 'TEXT');
+  // Group names exactly as TallyPrime spells them, so Tally imports and staff habits line up.
+  db.prepare(`UPDATE groups SET name='Branch/Divisions' WHERE name='Branch / Divisions'`).run();
+  db.prepare(`UPDATE groups SET name='Misc. Expenses (ASSET)' WHERE name='Misc. Expenses (Asset)'`).run();
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_client_key ON vouchers(client_key) WHERE client_key IS NOT NULL`);
   db.exec(`UPDATE vouchers SET party_gstin=COALESCE((SELECT gstin FROM ledgers WHERE id=vouchers.party_id),''),
     party_state=COALESCE(place_of_supply,'') WHERE party_gstin='' AND party_state='' AND party_id IS NOT NULL`);

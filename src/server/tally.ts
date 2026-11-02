@@ -121,7 +121,7 @@ const stateCode = (name: string) => Object.entries(STATES).find(([, n]) => n.toL
 export function importTallyMasters(books: Books, m: TallyMasters) {
   const result = { groups: 0, ledgers: 0, units: 0, stockGroups: 0, items: 0, skipped: [] as string[] };
   books.db.transaction(() => {
-    const haveGroup = (n: string) => books.db.prepare(`SELECT id FROM groups WHERE name=?`).get(n) as { id: number } | undefined;
+    const haveGroup = (n: string) => books.db.prepare(`SELECT id FROM groups WHERE name=? COLLATE NOCASE`).get(n) as { id: number } | undefined;
     // Parents first: keep looping until no more groups can be placed.
     let pending = m.groups.filter((g) => !haveGroup(g.name));
     for (let pass = 0; pass < 10 && pending.length; pass++) {
