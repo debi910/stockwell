@@ -5,6 +5,8 @@ import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName } from './nav
 import { parseDate, shortDate, todayISO } from './format';
 import { SCREENS, screenTitle } from './screens';
 import { LoginScreen } from './screens/Settings';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { DialogHost, confirmBox } from './components/Dialog';
 
 /** Checks whether logins are on and, if so, asks for one before opening the books. */
 export function App() {
@@ -12,7 +14,16 @@ export function App() {
   const [failed, setFailed] = useState('');
   const check = useCallback(() => api.get('/api/session').then(setSession).catch((e) => setFailed(e.message)), []);
   useEffect(() => { check(); whenLoggedOut(() => { setToken(null); check(); }); }, [check]);
-  const toaster = <Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 34, right: 196 }} toastOptions={{ className: 'sw-toast' }} />;
+  useEffect(() => {
+    // A failed request that a screen forgot to handle still shows a message instead of failing silently.
+    const onRejection = (e: PromiseRejectionEvent) => {
+      const msg = e.reason?.message ?? String(e.reason);
+      toast.error(/fetch|network/i.test(msg) ? 'Cannot reach the Stockwell server. If this is the second PC, check the main PC is on.' : msg);
+    };
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => window.removeEventListener('unhandledrejection', onRejection);
+  }, []);
+  const toaster = <><DialogHost /><Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 34, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
   if (failed) return <div className="empty-state">Cannot reach the Stockwell server: {failed}. If this is the second PC, check the main PC is on.</div>;
   if (!session) return <div className="empty-state">Opening Stockwell…</div>;
   if (session.usersEnabled && !session.user) {
@@ -114,7 +125,9 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
             return (
               <DepthContext.Provider key={i + s.name} value={i}>
                 <div style={{ display: i === top ? 'block' : 'none', height: '100%' }}>
-                  {C ? <C {...(s.props ?? {})} active={i === top} /> : <div className="empty-state">Unknown screen {s.name}</div>}
+                  <ErrorBoundary onBack={() => nav.pop()}>
+                    {C ? <C {...(s.props ?? {})} active={i === top} /> : <div className="empty-state">Unknown screen {s.name}</div>}
+                  </ErrorBoundary>
                 </div>
               </DepthContext.Provider>
             );
@@ -134,7 +147,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
         <footer className="statusbar">
           {conn ? (
             <button className="linkish" title="Change which PC keeps the books"
-              onClick={() => { if (window.confirm('Change this PC\'s setup (main PC or connect to another PC)? Stockwell will restart.')) window.stockwell?.resetConnection(); }}>{conn}</button>
+              onClick={async () => { if (await confirmBox('Change this PC\'s setup (main PC, or connect to another PC)?\nStockwell will restart.')) window.stockwell?.resetConnection(); }}>{conn}</button>
           ) : <span>Stockwell 0.1</span>}
           <span>Enter: next field · Ctrl+A: save · Alt+C: create · Esc: back</span>
         </footer>

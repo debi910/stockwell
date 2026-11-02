@@ -1,16 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
+import { promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
 import { drCr, formatINR, isValidGstin, rupeesText, toPaise } from '../format';
 
+/** Ctrl+A saves; a second press while the first save is still going is ignored, so nothing is saved twice. */
 function useSave(save: () => Promise<void>) {
+  const busy = useRef(false);
+  const once = async () => {
+    if (busy.current) return;
+    busy.current = true;
+    try { await save(); } finally { busy.current = false; }
+  };
   useScreenKeys((e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { save(); return true; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { once(); return true; }
     return false;
   });
-  useKeyBar([{ key: 'Ctrl+A', label: 'Accept', run: save }], [save]);
+  useKeyBar([{ key: 'Ctrl+A', label: 'Accept', run: once }], [save]);
 }
 
 // ---------------- Ledger ----------------
@@ -145,7 +153,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
   useSave(save);
 
   const createGroup = async (typed: string) => {
-    const name = typed || window.prompt('Name of the company or brand') || '';
+    const name = typed || (await promptBox('Name of the company or brand')) || '';
     if (!name) return;
     try {
       const g = await api.post('/api/stock-groups', { name });

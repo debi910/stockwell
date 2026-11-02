@@ -4,7 +4,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { backup, buildApp } from '../src/server/app';
+import { backup, buildApp, logError } from '../src/server/app';
 import { todayISO } from '../src/core/dates';
 
 const PORT = 7400;
@@ -24,6 +24,12 @@ const lanAddresses = () =>
     .filter((i): i is os.NetworkInterfaceInfo => !!i && i.family === 'IPv4' && !i.internal)
     .map((i) => i.address);
 
+const errorLog = path.join(userData, 'logs', 'errors.log');
+
+// Never die silently: write the problem down and keep going where that is safe.
+process.on('uncaughtException', (err) => logError(errorLog, 'main', err));
+process.on('unhandledRejection', (err) => logError(errorLog, 'main (promise)', err));
+
 let win: BrowserWindow | null = null;
 let config = readConfig();
 
@@ -41,13 +47,19 @@ function createWindow() {
   win.once('ready-to-show', () => win?.maximize());
   win.once('ready-to-show', () => win?.show());
   // Links to the GST portal and WhatsApp open outside the app.
+  // If the screen process crashes, reload it; the books are on the server and are not affected.
+  win.webContents.on('render-process-gone', (_e, details) => {
+    logError(errorLog, 'screen crashed', new Error(details.reason));
+    if (details.reason !== 'clean-exit') setTimeout(() => win?.webContents.reload(), 500);
+  });
+  win.webContents.on('unresponsive', () => logError(errorLog, 'screen', new Error('Window stopped responding')));
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   return win;
 }
 
 async function startMain() {
   const dbPath = path.join(userData, 'stockwell.db');
-  const { app: server, books } = await buildApp({ dbPath, uiDir: path.join(__dirname, '../ui') });
+  const { app: server, books } = await buildApp({ dbPath, uiDir: path.join(__dirname, '../ui'), errorLog });
   await server.listen({ port: PORT, host: '0.0.0.0' });
 
   // Daily backup: once a day while the app is open, and again when it closes.
@@ -59,7 +71,7 @@ async function startMain() {
       await backup(books, dir);
       config = { ...(config as Config), lastBackup: todayISO() };
       writeConfig(config);
-    } catch (e) { console.error('Backup failed', e); }
+    } catch (e) { logError(errorLog, 'backup', e); }
   };
   daily();
   setInterval(daily, 60 * 60 * 1000);
@@ -67,8 +79,10 @@ async function startMain() {
     if ((app as any).__closing) return;
     e.preventDefault();
     (app as any).__closing = true;
-    await daily(true);
-    await server.close();
+    try {
+      await daily(true);
+      await server.close(); // closes the database cleanly
+    } catch (err) { logError(errorLog, 'closing', err); }
     app.quit();
   });
   return `http://127.0.0.1:${PORT}`;

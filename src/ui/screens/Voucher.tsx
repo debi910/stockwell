@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, desktop, openWhatsApp, withToken } from '../api';
 import { Combo } from '../components/Combo';
 import { enterNext } from '../components/Field';
+import { confirmBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle, keyName } from '../nav';
 import { VOUCHER_LABEL, computeInvoice, drCr, focusNext, formatINR, isIntraState, parseDate, rupeesText, schemeFreeQty, shortDate, toPaise } from '../format';
 
@@ -208,8 +209,14 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     setTimeout(() => (formRef.current?.querySelector('input.f') as HTMLElement | null)?.focus(), 50);
   };
 
+  const saving = useRef(false);
   const save = async () => {
+    if (saving.current) return; // a second Ctrl+A while saving must not make a second voucher
     if (!date) { nav.toast('Enter a valid date', true); return; }
+    saving.current = true;
+    try { await doSave(); } finally { saving.current = false; }
+  };
+  const doSave = async () => {
     const body: any = { type, date, number, narration };
     if (inventory) {
       Object.assign(body, {
@@ -241,16 +248,23 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   };
 
   const cancelVoucher = async () => {
-    if (!id || !window.confirm(`Cancel ${label} ${number}? The number stays used and the voucher shows as cancelled.`)) return;
+    if (!id || !(await confirmBox(`Cancel ${label} ${number}?\nThe number stays used and the voucher shows as cancelled.`, { danger: true }))) return;
     try { await api.post(`/api/vouchers/${id}/cancel`); nav.toast(`${number} cancelled`); nav.pop(); } catch (e: any) { nav.toast(e.message, true); }
   };
 
   const print = async (vid: number, no: string) => { try { await printVoucher(vid, `${no.replace(/[\\/:*?"<>|]/g, '-')}.pdf`, nav.toast); } catch (e: any) { nav.toast(e.message, true); } };
   const whatsapp = async (vid: number) => { try { await sendBillOnWhatsApp(vid, nav.toast); } catch (e: any) { nav.toast(e.message, true); } };
 
+  const dirty = inventory ? !!partyId || filledLines.length > 0 : acc.some((l) => l.ledgerId || l.amount);
   useScreenKeys((e) => {
     const k = keyName(e);
     if (k === 'Ctrl+A') { save(); return true; }
+    if (k === 'Esc' && dirty) {
+      // Like Tally's "Quit? Yes or No": an unsaved voucher is never thrown away by one stray Esc.
+      confirmBox(id ? 'Leave without saving the changes?' : 'Quit this voucher? What you typed will be lost.', { yes: 'Quit', no: 'Keep typing' })
+        .then((quit) => { if (quit) nav.pop(); });
+      return true;
+    }
     if (TYPE_KEYS[k] && !id) {
       const t = TYPE_KEYS[k];
       if (t !== type) { setType(t); setAccountId(null); setLines([blankItem()]); setAcc([blankAcc(t === 'journal' ? 'Dr' : 'Cr')]); setPartyId(null); }

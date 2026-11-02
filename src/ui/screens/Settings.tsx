@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, desktop, openExternal, saveTextFile, setToken } from '../api';
 import { Row, Select, Text } from '../components/Field';
+import { promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
 import { formatINR, rupeesText, shortDate, toPaise } from '../format';
 
@@ -99,8 +100,8 @@ export function UsersScreen({ active }: { active: boolean }) {
   const update = async (id: number, patch: any) => {
     try { await api.put(`/api/users/${id}`, patch); load(); nav.toast('Saved'); } catch (e: any) { nav.toast(e.message, true); }
   };
-  const resetPassword = (u: any) => {
-    const p = window.prompt(`New password for ${u.name}`);
+  const resetPassword = async (u: any) => {
+    const p = await promptBox(`New password for ${u.name}`, { secret: true });
     if (p) update(u.id, { password: p });
   };
   return (

@@ -195,6 +195,12 @@ export function openDb(path: string): DB {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
+  // Refuse to open a damaged file rather than build new entries on top of it.
+  const check = db.pragma('quick_check', { simple: true });
+  if (check !== 'ok') {
+    db.close();
+    throw new Error(`The books file looks damaged (${check}). Restore the latest backup before using Stockwell.`);
+  }
   db.exec(SCHEMA);
   migrate(db);
   seed(db);

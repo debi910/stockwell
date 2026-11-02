@@ -16,6 +16,20 @@ export interface AppOptions {
   dbPath: string;
   uiDir?: string;
   logger?: boolean;
+  /** File where unexpected errors are written, so a problem can be traced later. */
+  errorLog?: string;
+}
+
+/** Appends one line to the error log; never throws (a full disk must not crash the server). */
+export function logError(file: string | undefined, where: string, err: unknown) {
+  const e = err as Error;
+  const line = `${new Date().toISOString()} [${where}] ${e?.message ?? String(err)}\n${e?.stack ?? ''}\n`;
+  if (!file) { console.error(line); return; }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) fs.renameSync(file, `${file}.old`);
+    fs.appendFileSync(file, line);
+  } catch { console.error(line); }
 }
 
 type Q = Record<string, string | undefined>;
@@ -29,9 +43,13 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const e = err as Error & { statusCode?: number; code?: string };
     if (err instanceof BooksError) return reply.status(400).send({ error: err.message });
     if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') return reply.status(400).send({ error: 'That name is already used.' });
+    if (e.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') return reply.status(400).send({ error: 'This is used in other entries, so it cannot be removed or changed this way.' });
+    if (e.code === 'SQLITE_BUSY' || e.code === 'SQLITE_LOCKED') return reply.status(503).send({ error: 'The books are busy with another save. Please press Ctrl+A again.' });
+    if (e.code === 'SQLITE_FULL') { logError(opts.errorLog, 'disk', err); return reply.status(507).send({ error: 'The disk on the main PC is full. Nothing was saved. Free some space and try again.' }); }
+    if (e.code?.startsWith?.('FST_ERR_CTP') || (e as { statusCode?: number }).statusCode === 400) return reply.status(400).send({ error: 'The request was not understood. Please try again.' });
     if (e.statusCode && e.statusCode < 500) return reply.status(e.statusCode).send({ error: e.message });
-    app.log.error(err);
-    return reply.status(500).send({ error: e.message || 'Something went wrong.' });
+    logError(opts.errorLog, `server ${_req.method} ${_req.url.split('?')[0]}`, err);
+    return reply.status(500).send({ error: `Something went wrong and nothing was saved. (${e.message || 'unknown error'})` });
   });
 
   app.addHook('onClose', async () => db.close());
@@ -152,6 +170,11 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return backup(books, dir);
   });
   app.get('/api/audit', async () => books.auditLog());
+  app.post('/api/client-error', async (req) => {
+    const b = (req.body ?? {}) as { message?: string; stack?: string };
+    logError(opts.errorLog, 'screen', Object.assign(new Error(String(b.message ?? '').slice(0, 500)), { stack: String(b.stack ?? '').slice(0, 8000) }));
+    return { ok: true };
+  });
 
   if (opts.uiDir && fs.existsSync(opts.uiDir)) {
     await app.register(fastifyStatic, { root: opts.uiDir });
