@@ -83,6 +83,8 @@ input.f.num { text-align: right; }
 .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; }
 .btn.primary:hover { background: var(--navy-2); }
 .btn.wa { background: #1a7f4b; border-color: #1a7f4b; color: #fff; }
+.btn.danger { color: #b42318; border-color: #e7b4ae; }
+.btn.danger:hover { background: #fdf0ee; border-color: #b42318; }
 .btn.small { padding: 3px 8px; font-size: 12px; }
 .btn:disabled { opacity: .5; cursor: default; }
 .check { display: flex; align-items: center; gap: 6px; }

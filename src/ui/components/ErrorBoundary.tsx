@@ -1,3 +1,4 @@
+import { authHeaders } from '../api';
 import { Component, type ReactNode } from 'react';
 
 /**
@@ -15,7 +16,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode; onBack?: () 
     console.error('Screen error', error, info.componentStack);
     fetch('/api/client-error', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ message: error.message, stack: `${error.stack ?? ''}\n${info.componentStack ?? ''}`.slice(0, 8000) }),
     }).catch(() => {});
   }

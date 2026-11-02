@@ -209,8 +209,22 @@ export function openDb(path: string): DB {
 
 /** Small upgrades for databases made by older versions. */
 function migrate(db: DB) {
-  const cols = (db.prepare(`PRAGMA table_info(audit)`).all() as { name: string }[]).map((c) => c.name);
-  if (!cols.includes('user_name')) db.exec(`ALTER TABLE audit ADD COLUMN user_name TEXT`);
+  const add = (table: string, column: string, def: string) => {
+    const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+  };
+  add('audit', 'user_name', 'TEXT');
+  // taxable | nil | exempt | nongst: how a 0% line is reported in GSTR-1 Table 8 and GSTR-3B 3.1(c)/(e).
+  add('items', 'taxability', "TEXT NOT NULL DEFAULT 'taxable'");
+  // The party's GSTIN and state as they were on the bill, so old returns never change when a master is edited.
+  add('vouchers', 'party_gstin', "TEXT NOT NULL DEFAULT ''");
+  add('vouchers', 'party_state', "TEXT NOT NULL DEFAULT ''");
+  add('company', 'allow_negative_stock', 'INTEGER NOT NULL DEFAULT 0');
+  add('company', 'last_backup', "TEXT NOT NULL DEFAULT ''");
+  add('vouchers', 'client_key', 'TEXT');
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_client_key ON vouchers(client_key) WHERE client_key IS NOT NULL`);
+  db.exec(`UPDATE vouchers SET party_gstin=COALESCE((SELECT gstin FROM ledgers WHERE id=vouchers.party_id),''),
+    party_state=COALESCE(place_of_supply,'') WHERE party_gstin='' AND party_state='' AND party_id IS NOT NULL`);
 }
 
 function seed(db: DB) {

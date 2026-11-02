@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, desktop, openExternal, saveTextFile, setToken } from '../api';
+import { api, desktop, openExternal, saveTextFile, setToken, getToken } from '../api';
 import { Row, Select, Text } from '../components/Field';
 import { promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
@@ -208,7 +208,7 @@ export function GstScreen({ active }: { active: boolean }) {
     const [a, b, c] = await Promise.all([
       api.get(`/api/gst/gstr1?period=${period}`),
       api.get(`/api/gst/gstr3b?period=${period}`),
-      api.get(`/api/gst/eway-candidates?from=${from}&to=${to}`),
+      api.get(`/api/gst/eway-candidates?from=${from}&to=${to}&all=1`),
     ]);
     setG1(a); setG3(b);
     const pending = c.filter((v: any) => v.date < to);
@@ -276,6 +276,12 @@ export function GstScreen({ active }: { active: boolean }) {
             <div className="card"><div className="subtle">Taxable value</div><div className="v">₹{rs(g1.summary.taxable)}</div></div>
           </div>
           {g1.missingGstin && <p className="tag bad">The company GSTIN is missing. Press F3 to add it before making the file.</p>}
+          {g1.problems?.length > 0 && (
+            <div className="panel" style={{ padding: 12, marginTop: 10 }} role="alert">
+              <b>Fix these before uploading:</b>
+              <ul className="steps">{g1.problems.slice(0, 20).map((p: string) => <li key={p}>{p}</li>)}</ul>
+            </div>
+          )}
           <div className="actions" style={{ justifyContent: 'flex-start' }}>
             <button className="btn primary" onClick={saveGstr1}>Save GSTR-1 file (Ctrl+E)</button>
           </div>
@@ -297,13 +303,23 @@ export function GstScreen({ active }: { active: boolean }) {
             <thead><tr><th>Section</th><th className="num">Taxable value</th><th className="num">IGST</th><th className="num">CGST</th><th className="num">SGST</th></tr></thead>
             <tbody>
               <tr><td>3.1(a) Outward taxable supplies</td><td className="num">{rs(g3.outward.taxable)}</td><td className="num">{rs(g3.outward.igst)}</td><td className="num">{rs(g3.outward.cgst)}</td><td className="num">{rs(g3.outward.sgst)}</td></tr>
-              <tr><td>4(A)(5) Input tax credit (purchases)</td><td className="num">{rs(g3.itc.taxable)}</td><td className="num">{rs(g3.itc.igst)}</td><td className="num">{rs(g3.itc.cgst)}</td><td className="num">{rs(g3.itc.sgst)}</td></tr>
-              <tr className="total"><td>Tax to pay before set-off</td><td /><td className="num">{rs(g3.payable.igst)}</td><td className="num">{rs(g3.payable.cgst)}</td><td className="num">{rs(g3.payable.sgst)}</td></tr>
+              <tr><td>3.1(c) Nil-rated and exempt supplies</td><td className="num">{rs(g3.nilExempt.taxable)}</td><td /><td /><td /></tr>
+              {g3.nonGst.taxable !== 0 && <tr><td>3.1(e) Non-GST supplies</td><td className="num">{rs(g3.nonGst.taxable)}</td><td /><td /><td /></tr>}
+              <tr><td>4(A)(5) Input tax credit (from registered suppliers, per books)</td><td className="num">{rs(g3.itc.taxable)}</td><td className="num">{rs(g3.itc.igst)}</td><td className="num">{rs(g3.itc.cgst)}</td><td className="num">{rs(g3.itc.sgst)}</td></tr>
+              <tr><td>5. Exempt and nil-rated purchases (inter-state / intra-state)</td><td className="num">{rs(g3.inwardExempt.inter)} / {rs(g3.inwardExempt.intra)}</td><td /><td /><td /></tr>
+              <tr className="total"><td>Cash to pay after using credit (Rule 88A order)</td><td /><td className="num">{rs(g3.payable.igst)}</td><td className="num">{rs(g3.payable.cgst)}</td><td className="num">{rs(g3.payable.sgst)}</td></tr>
+              <tr><td>Credit carried forward</td><td /><td className="num">{rs(g3.carryForward.igst)}</td><td className="num">{rs(g3.carryForward.cgst)}</td><td className="num">{rs(g3.carryForward.sgst)}</td></tr>
             </tbody>
           </table>
+          {g3.interStateB2C.length > 0 && (
+            <table className="r" style={{ marginTop: 12 }}>
+              <thead><tr><th>3.2 Inter-state supplies to unregistered persons · place of supply</th><th className="num">Taxable value</th><th className="num">IGST</th></tr></thead>
+              <tbody>{g3.interStateB2C.map((x: any) => <tr key={x.pos}><td>{x.pos} {nav.meta.states[x.pos] ?? ''}</td><td className="num">{rs(x.taxable)}</td><td className="num">{rs(x.igst)}</td></tr>)}</tbody>
+            </table>
+          )}
           <p className="hint" style={{ marginTop: 10 }}>
-            Type these figures into GSTR-3B on the portal. Check input tax credit against GSTR-2B there before you file: only credit shown in 2B can be claimed.
-            A negative amount means credit carries forward.
+            Type these figures into GSTR-3B on the portal. Before filing, match the input credit with GSTR-2B (and accept or reject invoices in IMS): only credit shown there can be claimed,
+            so use the portal's figure if it is lower. Set-off follows the legal order: IGST credit first, then CGST and SGST credit.
           </p>
         </>
       )}
@@ -406,25 +422,33 @@ export function BackupScreen() {
     setBusy(true);
     try { const r = await api.post('/api/backup', {}); setLast(r.file); nav.toast('Backup done'); } catch (e: any) { nav.toast(e.message, true); } finally { setBusy(false); }
   }, []);
+  const restore = useCallback(async () => {
+    try { await desktop!.restore!(getToken()); } catch (e: any) { nav.toast(e.message?.replace(/^Error invoking remote method '\w+': (Error: )?/, '') ?? String(e), true); }
+  }, []);
   useKeyBar([{ key: 'Ctrl+A', label: 'Back up now', run }], [run]);
   useScreenKeys((e) => { if (e.ctrlKey && e.key.toLowerCase() === 'a') { run(); return true; } return false; });
-  const dir = nav.company.backup_dir;
+  const dir = nav.company.backup_dir || nav.company.default_backup_dir;
   return (
     <div className="form" style={{ maxWidth: 640 }}>
       <h2>Backup</h2>
       <Row label="Backup folder">{dir ? <b>{dir}</b> : <span className="tag warn">Not chosen. Set it in Company settings (F3).</span>}</Row>
-      <p className="hint">Stockwell also backs up by itself once a day on the main PC and keeps the last 30 copies. A pen drive or a Google Drive folder is a good choice, so a dead hard disk does not take the books with it.</p>
+      <Row label="Last backup">{nav.company.last_backup ? <b>{new Date(nav.company.last_backup).toLocaleString('en-IN')}</b> : <span className="tag warn">Never</span>}</Row>
+      <p className="hint">Stockwell backs up by itself once a day on the main PC and when it closes. Each copy is checked after it is made. It keeps the last 30 copies plus one per month for two years.
+        {!nav.company.backup_dir && ' The copies are on this same hard disk now; choose a pen drive or a Google Drive folder in Company settings so a dead disk does not take the books with it.'}</p>
       <div className="actions" style={{ justifyContent: 'flex-start' }}>
         <button className="btn primary go" disabled={busy || !dir} onClick={run} autoFocus>{busy ? 'Backing up…' : 'Back up now (Ctrl+A)'}</button>
         {!dir && <button className="btn" onClick={() => nav.push({ name: 'company' })}>Open Company settings</button>}
       </div>
       {last && <p className="hint">Saved as <b>{last}</b></p>}
       <div className="section-title" style={{ gridColumn: 'auto', marginTop: 16 }}>To restore</div>
-      <ol className="steps">
-        <li>Close Stockwell on every PC.</li>
-        <li>On the main PC, copy the backup file over <code>stockwell.db</code> in the Stockwell data folder{dataDir ? <> (<b>{dataDir}</b>)</> : ''}.</li>
-        <li>Open Stockwell again.</li>
-      </ol>
+      {desktop?.restore ? (
+        <>
+          <p className="hint">Close Stockwell on the second PC first. Restoring replaces today's books with the backup. The current books are kept as a safety copy in the data folder{dataDir ? <> (<b>{dataDir}</b>)</> : ''}, so nothing is lost.</p>
+          <div className="actions" style={{ justifyContent: 'flex-start' }}><button className="btn danger" onClick={restore}>Restore from a backup…</button></div>
+        </>
+      ) : (
+        <p className="hint">Restoring is done on the main PC: open this screen there.</p>
+      )}
     </div>
   );
 }

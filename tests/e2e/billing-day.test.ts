@@ -93,7 +93,7 @@ describe('a billing day', () => {
     await type('Quantity 1', '5');
     await snap('04-sales');
     await page.keyboard.press('Control+a');
-    await page.getByText(/Saved|saved/).first().waitFor({ timeout: 3000 });
+    await page.getByText(/Sales S\/.* saved/).first().waitFor({ timeout: 3000 });
     await snap('05-sales-saved');
     await page.keyboard.press('Escape');
   });

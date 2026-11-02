@@ -44,6 +44,12 @@ export function parseDate(text: string, ref: string = todayISO()): string | null
   }
   let y = parts[2] !== undefined ? Number(parts[2]) : ry;
   if (y < 100) y += 2000;
+  // With no year typed, stay inside the current financial year (April to March), as Tally does:
+  // in November, "31.3" means March of next year.
+  if (parts[2] === undefined) {
+    const fyStartYear = rm >= 4 ? ry : ry - 1;
+    y = m >= 4 ? fyStartYear : fyStartYear + 1;
+  }
   if (!d || !m || m < 1 || m > 12 || d < 1 || d > 31 || !y) return null;
   const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
   const check = new Date(`${iso}T00:00:00Z`);

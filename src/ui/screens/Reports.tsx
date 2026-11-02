@@ -113,6 +113,7 @@ export function TrialBalance({ active }: { active: boolean }) {
               <td className="num">{r.balance < 0 ? formatINR(-r.balance) : ''}</td>
             </tr>
           ))}
+          {data.profitLossAc !== 0 && <tr className="group"><td>Profit &amp; Loss A/c</td><td className="num">{data.profitLossAc > 0 ? formatINR(data.profitLossAc) : ''}</td><td className="num">{data.profitLossAc < 0 ? formatINR(-data.profitLossAc) : ''}</td></tr>}
           {data.openingStock > 0 && <tr><td>Opening Stock</td><td className="num">{formatINR(data.openingStock)}</td><td /></tr>}
           {data.openingDiff !== 0 && <tr><td><span className="tag warn">Difference in opening balances</span></td><td className="num">{data.openingDiff < 0 ? formatINR(-data.openingDiff) : ''}</td><td className="num">{data.openingDiff > 0 ? formatINR(data.openingDiff) : ''}</td></tr>}
           <tr className="total"><td>Grand Total</td><td className="num">{formatINR(data.totalDr + Math.max(0, -data.openingDiff))}</td><td className="num">{formatINR(data.totalCr + Math.max(0, data.openingDiff))}</td></tr>
@@ -414,8 +415,9 @@ export function Alerts({ active }: { active: boolean }) {
 
       {a.msmeReceivables.length > 0 && <>
         <h3>Late payments under the MSME Act (buyers marked as covered)</h3>
+        <p className="hint" style={{ marginTop: 0 }}>{a.msmeNote}</p>
         <table className="r"><thead><tr><th>Party</th><th>Bill</th><th>Was due</th><th className="num">Pending</th><th className="num">Days late</th><th className="num">Interest</th></tr></thead><tbody>
-          {a.msmeReceivables.map((b: any) => <tr key={`${b.ledger_id}-${b.ref}`}><td>{b.ledger_name}</td><td>{b.ref}</td><td>{shortDate(b.msme_due)}</td><td className="num">{formatINR(b.pending)}</td><td className="num">{b.late_days}</td><td className="num">{formatINR(b.interest)}</td></tr>)}
+          {a.msmeReceivables.map((b: any) => <tr key={`${b.ledger_id}-${b.ref}`}><td>{b.ledger_name}</td><td>{b.ref}</td><td>{shortDate(b.msme_due)}</td><td className="num">{b.paid_late ? <span className="tag warn">paid late</span> : formatINR(b.pending)}</td><td className="num">{b.late_days}</td><td className="num">{formatINR(b.interest)}</td></tr>)}
         </tbody></table>
       </>}
 

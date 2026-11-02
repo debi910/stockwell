@@ -35,14 +35,14 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
       <td class="c">${i + 1}</td>
       <td>${esc(l.item_name)}${l.batch_no ? `<div class="sub">Batch ${esc(l.batch_no)}${l.expiry_date ? ` · Exp ${esc(shortDate(l.expiry_date))}` : ''}</div>` : ''}</td>
       <td class="c">${esc(l.hsn)}</td>
-      <td class="r">${l.qty} ${esc(l.unit)}${l.free_qty ? `<div class="sub">+${l.free_qty} free</div>` : ''}</td>
+      <td class="r">${esc(l.qty)} ${esc(l.unit)}${l.free_qty ? `<div class="sub">+${esc(l.free_qty)} free</div>` : ''}</td>
       <td class="r">${formatINR(l.rate)}</td>
-      <td class="r">${l.discount_pct ? l.discount_pct + '%' : ''}</td>
-      <td class="r">${l.gst_rate}%</td>
+      <td class="r">${l.discount_pct ? esc(l.discount_pct) + '%' : ''}</td>
+      <td class="r">${esc(l.gst_rate)}%</td>
       <td class="r">${formatINR(l.taxable)}</td>
     </tr>`).join('');
   const taxRows = [...byRate.entries()].sort((a, b) => a[0] - b[0]).map(([rate, t]) => `
-    <tr><td class="r">${rate}%</td><td class="r">${formatINR(t.taxable)}</td>
+    <tr><td class="r">${esc(rate)}%</td><td class="r">${formatINR(t.taxable)}</td>
     ${intra ? `<td class="r">${formatINR(t.cgst)}</td><td class="r">${formatINR(t.sgst)}</td>` : `<td class="r">${formatINR(t.igst)}</td>`}</tr>`).join('');
   const outstanding = party && books.isBillWise(party.id)
     ? books.pendingBills({ ledgerId: party.id }).reduce((a, b) => a + b.pending, 0) : 0;

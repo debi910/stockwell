@@ -10,7 +10,7 @@ import { DialogHost, confirmBox } from './components/Dialog';
 
 /** Checks whether logins are on and, if so, asks for one before opening the books. */
 export function App() {
-  const [session, setSession] = useState<{ usersEnabled: boolean; user: any } | null>(null);
+  const [session, setSession] = useState<{ usersEnabled: boolean; user: any; needsOwnerSetup?: boolean } | null>(null);
   const [failed, setFailed] = useState('');
   const check = useCallback(() => api.get('/api/session').then(setSession).catch((e) => setFailed(e.message)), []);
   useEffect(() => { check(); whenLoggedOut(() => { setToken(null); check(); }); }, [check]);
@@ -26,6 +26,15 @@ export function App() {
   const toaster = <><DialogHost /><Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 34, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
   if (failed) return <div className="empty-state">Cannot reach the Stockwell server: {failed}. If this is the second PC, check the main PC is on.</div>;
   if (!session) return <div className="empty-state">Opening Stockwell…</div>;
+  if (session.needsOwnerSetup) {
+    return (
+      <div className="empty-state">
+        The books are locked to other PCs until the Owner's login is set up. On the main PC, open Stockwell and go to
+        Settings &gt; Users, create the Owner login, then come back here and press F5.
+        <div style={{ marginTop: 12 }}><button className="btn" onClick={check}>Try again</button></div>
+      </div>
+    );
+  }
   if (session.usersEnabled && !session.user) {
     return <>{toaster}<LoginScreen onLogin={(user) => setSession({ usersEnabled: true, user })} /></>;
   }

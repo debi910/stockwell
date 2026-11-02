@@ -6,7 +6,8 @@ describe('dates', () => {
     expect(parseDate('2-11-26')).toBe('2026-11-02');
     expect(parseDate('02/11/2026')).toBe('2026-11-02');
     expect(parseDate('5', '2026-11-02')).toBe('2026-11-05');
-    expect(parseDate('5-nov', '2026-01-02')).toBe('2026-11-05');
+    expect(parseDate('5-nov', '2026-01-02')).toBe('2025-11-05'); // stays in FY 2025-26, like Tally
+    expect(parseDate('31.3', '2026-11-02')).toBe('2027-03-31');
     expect(parseDate('31-2-26')).toBeNull();
   });
   it('finds the financial year', () => {

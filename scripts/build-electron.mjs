@@ -14,4 +14,5 @@ const common = {
 
 await build({ ...common, entryPoints: ['electron/main.ts'], outfile: 'dist/electron/main.cjs' });
 await build({ ...common, entryPoints: ['electron/preload.ts'], outfile: 'dist/electron/preload.cjs' });
+await build({ ...common, entryPoints: ['electron/preload-setup.ts'], outfile: 'dist/electron/preload-setup.cjs' });
 fs.copyFileSync('electron/setup.html', 'dist/electron/setup.html');

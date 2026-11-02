@@ -11,8 +11,19 @@ export function setToken(t: string | null) {
   token = t;
   try { if (t) sessionStorage.setItem('stockwell-token', t); else sessionStorage.removeItem('stockwell-token'); } catch { /* ignore */ }
 }
-/** Adds the login token to a link opened outside fetch, such as the printed bill. */
-export const withToken = (url: string) => (token ? `${url}${url.includes('?') ? '&' : '?'}t=${token}` : url);
+export const getToken = () => token;
+
+/** Headers that carry the login, for the odd fetch made outside api below. */
+export const authHeaders = (): Record<string, string> => (token ? { 'x-stockwell-token': token } : {});
+
+/** A link to the printed bill for a new window or the PDF maker. It carries a one-use pass
+ *  that lasts a minute, never the login token itself. */
+export async function printUrl(id: number): Promise<string> {
+  const base = `${location.origin}/api/vouchers/${id}/print`;
+  if (!token) return base;
+  const { ticket } = await api.post<{ ticket: string | null }>('/api/print-ticket');
+  return ticket ? `${base}?ticket=${ticket}` : base;
+}
 
 let onLoggedOut: () => void = () => {};
 export const whenLoggedOut = (f: () => void) => { onLoggedOut = f; };
@@ -21,9 +32,18 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['x-stockwell-token'] = token;
-  const res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+  let res: Response;
+  try {
+    res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(method === 'GET' ? 30000 : 20000) });
+  } catch (e: any) {
+    const timedOut = e?.name === 'TimeoutError';
+    throw new ApiError(timedOut
+      ? 'The main PC took too long to answer. Check the network, then look in the Day Book before saving again.'
+      : 'Cannot reach Stockwell on the main PC. Check that it is on and connected to the office network.', 0);
+  }
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
   if (res.status === 401) onLoggedOut();
   if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status);
   return data as T;
@@ -45,6 +65,8 @@ interface Bridge {
   chooseFolder(): Promise<string | null>;
   connection(): Promise<{ mode: 'main' | 'client'; address: string; lanAddresses: string[]; dataDir?: string }>;
   resetConnection(): Promise<void>;
+  /** Only on the main PC. */
+  restore?(token: string | null): Promise<void>;
 }
 
 declare global {

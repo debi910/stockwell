@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, desktop, openWhatsApp, withToken } from '../api';
+import { api, desktop, openWhatsApp, printUrl } from '../api';
 import { Combo } from '../components/Combo';
 import { enterNext } from '../components/Field';
 import { confirmBox } from '../components/Dialog';
@@ -13,27 +13,31 @@ interface ItemLine { key: number; itemId: number | null; batchId: number | null;
 interface AccLine { key: number; ledgerId: number | null; amount: string; side: 'Dr' | 'Cr'; bills: { ref: string; amount: number }[] | null }
 
 let keySeq = 1;
+/** A random key. crypto.randomUUID is missing on the second PC (plain http), so build one from random bytes. */
+const newKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 const blankItem = (): ItemLine => ({ key: keySeq++, itemId: null, batchId: null, batchNo: '', expiry: '', qty: '', free: '', freeTouched: false, rate: '', disc: '' });
 const blankAcc = (side: 'Dr' | 'Cr' = 'Cr'): AccLine => ({ key: keySeq++, ledgerId: null, amount: '', side, bills: null });
 
 /** Saves the bill as PDF (desktop) or opens it for printing (browser). */
 export async function printVoucher(id: number, fileName: string, toast: (m: string, e?: boolean) => void) {
-  const url = withToken(`${location.origin}/api/vouchers/${id}/print`);
-  if (desktop) {
-    const path = await desktop.savePdf(url, fileName);
-    toast(`Saved ${path}`);
-    return path;
+  if (!desktop) {
+    // Open the window first (browsers only allow it straight after a key press), then point it at the bill.
+    const w = window.open('about:blank', '_blank');
+    if (!w) throw new Error('The browser blocked the print window. Allow pop-ups for Stockwell.');
+    w.location.href = await printUrl(id);
+    setTimeout(() => { try { w.print(); } catch { /* window closed */ } }, 800);
+    return null;
   }
-  const w = window.open(url, '_blank');
-  setTimeout(() => w?.print(), 600);
-  return null;
+  const path = await desktop.savePdf(await printUrl(id), fileName);
+  toast(`Saved ${path}`);
+  return path;
 }
 
 export async function sendBillOnWhatsApp(id: number, toast: (m: string, e?: boolean) => void) {
   const msg = await api.get(`/api/vouchers/${id}/whatsapp`);
   if (!msg.phone) toast(`No mobile number for ${msg.partyName}. Add it in the ledger to send directly.`, true);
   if (desktop) {
-    const path = await desktop.savePdf(withToken(`${location.origin}/api/vouchers/${id}/print`), msg.fileName);
+    const path = await desktop.savePdf(await printUrl(id), msg.fileName);
     await desktop.showInFolder(path);
     toast('Bill PDF is ready in the folder that opened. Drag it into the WhatsApp chat, then press Send.');
   }
@@ -48,6 +52,10 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   const [items, setItems] = useState<any[]>([]);
   const [batches, setBatches] = useState<Record<number, any[]>>({});
   const [number, setNumber] = useState('');
+  // The number shown is a guess until saving; the server gives the real next number unless the user typed one.
+  const numberTyped = useRef(false);
+  // One key per voucher being entered, so a save that is retried after a network hiccup never makes two vouchers.
+  const clientKey = useRef(newKey());
   const [dateText, setDateText] = useState(shortDate(nav.workDate));
   const [partyId, setPartyId] = useState<number | null>(null);
   const [accountId, setAccountId] = useState<number | null>(null);
@@ -217,7 +225,9 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     try { await doSave(); } finally { saving.current = false; }
   };
   const doSave = async () => {
-    const body: any = { type, date, number, narration };
+    const body: any = { type, date, narration };
+    if (id || numberTyped.current) body.number = number;
+    if (!id) body.clientKey = clientKey.current;
     if (inventory) {
       Object.assign(body, {
         partyId, accountId, refNo, againstRef: againstRef || undefined, vehicleNo: vehicle, distanceKm: Number(distance) || 0,
@@ -241,6 +251,8 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
       nav.toast(`${label} ${v.number} saved · ₹${formatINR(v.total)}`);
       if (id) { nav.pop(); return; }
       setLast(v);
+      numberTyped.current = false;
+      clientKey.current = newKey();
       reset();
       api.get(`/api/vouchers/next-number?type=${type}&date=${date}`).then((r) => setNumber(r.number));
       if (Object.keys(batches).length) Object.keys(batches).forEach((k) => loadBatches(Number(k)));
@@ -304,7 +316,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   return (
     <div className="voucher" data-form ref={formRef}>
       <div className="vhead">
-        <div><span className="vtype">{label}</span><span className="vno">No. <input className="f" style={{ width: 150, display: 'inline-block' }} aria-label="Voucher number" value={number} onChange={(e) => setNumber(e.target.value)} onKeyDown={enterNext} /></span></div>
+        <div><span className="vtype">{label}</span><span className="vno">No. <input className="f" style={{ width: 150, display: 'inline-block' }} aria-label="Voucher number" value={number} onChange={(e) => { numberTyped.current = true; setNumber(e.target.value); }} onKeyDown={enterNext} /></span></div>
         {last && !id && (
           <div className="subtle">
             Last saved: <b>{last.number}</b> ₹{formatINR(last.total)}{' '}

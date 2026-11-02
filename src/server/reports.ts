@@ -22,6 +22,26 @@ export function ledgerBalances(books: Books, asOf: string, from?: string): Balan
   return rows;
 }
 
+/** First day of the financial year of a date, but never before the books begin. */
+export function yearStart(books: Books, asOf: string): string {
+  const fy = financialYear(asOf).start;
+  const from = books.company().books_from;
+  return fy > from ? fy : from;
+}
+
+const INCOME_EXPENSE = `SELECT l.id FROM ledgers l JOIN groups g ON g.id=l.group_id WHERE g.nature IN ('income','expense')`;
+
+/**
+ * Balances as Tally shows them in the trial balance: assets and liabilities carry forward,
+ * income and expense ledgers start again at zero each April.
+ */
+export function yearBalances(books: Books, asOf: string): BalanceRow[] {
+  const start = yearStart(books, asOf);
+  const ie = new Set((books.db.prepare(INCOME_EXPENSE).all() as { id: number }[]).map((r) => r.id));
+  const thisYear = new Map(ledgerBalances(books, asOf, start).map((b) => [b.id, b.balance]));
+  return ledgerBalances(books, asOf).map((b) => (ie.has(b.id) ? { ...b, balance: thisYear.get(b.id) ?? 0 } : b));
+}
+
 export function groupTree(books: Books, balances: BalanceRow[], include: (g: Group) => boolean = () => true): GroupNode[] {
   const groups = books.groups();
   const nodes = new Map<number, GroupNode>();
@@ -66,8 +86,8 @@ export function stockSummary(books: Books, asOf: string, from?: string): StockRo
       COALESCE(SUM(CASE WHEN iv.direction<0 AND v.date<? THEN iv.qty+iv.free_qty END),0) AS out_before,
       COALESCE(SUM(CASE WHEN iv.direction>0 AND v.date>=? THEN iv.qty+iv.free_qty END),0) AS inward,
       COALESCE(SUM(CASE WHEN iv.direction<0 AND v.date>=? THEN iv.qty+iv.free_qty END),0) AS outward,
-      COALESCE(SUM(CASE WHEN v.type='purchase' THEN iv.qty+iv.free_qty END),0) AS bought_qty,
-      COALESCE(SUM(CASE WHEN v.type='purchase' THEN iv.taxable END),0) AS bought_value
+      COALESCE(SUM(CASE WHEN v.type='purchase' THEN iv.qty+iv.free_qty WHEN v.type='debit_note' THEN -(iv.qty+iv.free_qty) END),0) AS bought_qty,
+      COALESCE(SUM(CASE WHEN v.type='purchase' THEN iv.taxable WHEN v.type='debit_note' THEN -iv.taxable END),0) AS bought_value
     FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id
     WHERE iv.item_id=? AND v.cancelled=0 AND v.date<=?`);
   const start = from ?? '0000-01-01';
@@ -97,13 +117,25 @@ export function openingStockValue(books: Books): number {
 
 // ---------- statements ----------
 export function trialBalance(books: Books, asOf: string) {
-  const balances = ledgerBalances(books, asOf);
+  const start = yearStart(books, asOf);
+  const booksFrom = books.company().books_from;
+  const balances = yearBalances(books, asOf);
   const tree = groupTree(books, balances);
-  const dr = balances.filter((b) => b.balance > 0).reduce((a, b) => a + b.balance, 0);
-  const cr = -balances.filter((b) => b.balance < 0).reduce((a, b) => a + b.balance, 0);
-  const openingStock = openingStockValue(books);
-  const openingDiff = (books.db.prepare(`SELECT COALESCE(SUM(opening),0) s FROM ledgers`).get() as { s: number }).s + openingStock;
-  return { asOf, tree, openingStock, openingDiff, totalDr: dr + openingStock, totalCr: cr };
+  const openingStockBooks = openingStockValue(books);
+  // From the second year on, earlier years' result sits in the Profit & Loss A/c line, and the year
+  // opens with the stock that was on hand at its start (as in Tally).
+  let profitLossAc = 0;
+  let openingStock = openingStockBooks;
+  if (start > booksFrom) {
+    const ie = new Set((books.db.prepare(INCOME_EXPENSE).all() as { id: number }[]).map((r) => r.id));
+    const earlierIE = ledgerBalances(books, addDays(start, -1)).filter((b) => ie.has(b.id)).reduce((a, b) => a + b.balance, 0);
+    openingStock = stockValue(books, addDays(start, -1));
+    profitLossAc = earlierIE + openingStockBooks - openingStock; // +Dr: a loss; -Cr: a profit
+  }
+  const dr = balances.filter((b) => b.balance > 0).reduce((a, b) => a + b.balance, 0) + Math.max(0, profitLossAc);
+  const cr = -balances.filter((b) => b.balance < 0).reduce((a, b) => a + b.balance, 0) + Math.max(0, -profitLossAc);
+  const openingDiff = (books.db.prepare(`SELECT COALESCE(SUM(opening),0) s FROM ledgers`).get() as { s: number }).s + openingStockBooks;
+  return { asOf, from: start, tree, openingStock, profitLossAc, openingDiff, totalDr: dr + openingStock, totalCr: cr };
 }
 
 function sumNature(tree: GroupNode[], pick: (n: GroupNode) => boolean) {
@@ -150,10 +182,14 @@ export function balanceSheet(books: Books, asOf: string) {
 
 export function ledgerStatement(books: Books, ledgerId: number, from: string, to: string) {
   const l = books.ledger(ledgerId);
+  // Income and expense ledgers start each financial year at zero.
+  const nature = books.group(l.group_id).nature;
+  const pl = nature === 'income' || nature === 'expense';
+  const floor = pl ? yearStart(books, from) : '0000-01-01';
   const before = books.db.prepare(`
     SELECT COALESCE(SUM(e.amount),0) s FROM entries e JOIN vouchers v ON v.id=e.voucher_id
-    WHERE e.ledger_id=? AND v.cancelled=0 AND v.date<?`).get(ledgerId, from) as { s: number };
-  const opening = l.opening + before.s;
+    WHERE e.ledger_id=? AND v.cancelled=0 AND v.date<? AND v.date>=?`).get(ledgerId, from, floor) as { s: number };
+  const opening = (pl ? 0 : l.opening) + before.s;
   const rows = books.db.prepare(`
     SELECT v.id AS voucher_id, v.date, v.type, v.number, v.narration, e.amount,
       (SELECT GROUP_CONCAT(l2.name, ', ') FROM entries e2 JOIN ledgers l2 ON l2.id=e2.ledger_id
@@ -180,15 +216,38 @@ export function alerts(books: Books, asOf = todayISO()) {
   // MSMED Act: payment is due within the agreed period, at most 45 days, or 15 days if nothing was agreed.
   const msmeLimit = (creditDays: number) => Math.min(creditDays > 0 ? creditDays : 15, 45);
   const rate = company.msme_interest_rate || 0;
-  const msmeReceivables = pending
-    .filter((b) => b.pending > 0 && b.msme_buyer && b.ref !== 'Opening')
-    .map((b) => {
-      const lateDays = Math.max(0, b.age_days - msmeLimit(b.credit_days));
-      // Compound interest with monthly rests, as the Act requires.
-      const interest = rate > 0 && lateDays > 0 ? Math.round(b.pending * (Math.pow(1 + rate / 1200, lateDays / 30) - 1)) : 0;
-      return { ...b, msme_due: addDays(b.bill_date, msmeLimit(b.credit_days)), late_days: lateDays, interest };
-    })
-    .filter((b) => b.late_days > 0);
+  /** s.16 MSMED Act: compound interest with monthly rests from the day after the due date until payment. */
+  const interestOn = (amount: number, lateDays: number) => {
+    if (rate <= 0 || lateDays <= 0 || amount <= 0) return 0;
+    const months = Math.floor(lateDays / 30);
+    const days = lateDays - months * 30;
+    return Math.round(amount * (Math.pow(1 + rate / 1200, months) * (1 + (rate / 100) * days / 365) - 1));
+  };
+  // Every MSME buyer's bill that was (or still is) paid late, including bills already settled late:
+  // interest runs until the day each part was paid.
+  const fyStart = financialYear(asOf).start;
+  const msmeBills = books.db.prepare(`
+    SELECT b.ledger_id, l.name AS ledger_name, l.phone, l.credit_days, b.ref, b.date AS bill_date, b.amount AS bill_amount
+    FROM bills b JOIN ledgers l ON l.id=b.ledger_id
+    WHERE l.msme_buyer=1 AND b.kind='new' AND b.voucher_id IS NOT NULL AND b.amount>0 AND b.date<=?`).all(asOf) as
+    { ledger_id: number; ledger_name: string; phone: string; credit_days: number; ref: string; bill_date: string; bill_amount: number }[];
+  const paymentsQ = books.db.prepare(`SELECT date, -amount AS paid FROM bills WHERE ledger_id=? AND ref=? AND kind='agst' AND date<=? ORDER BY date`);
+  const msmeReceivables = msmeBills.map((b) => {
+    const due = addDays(b.bill_date, msmeLimit(b.credit_days));
+    let pending = b.bill_amount;
+    let interest = 0;
+    let lastPaid: string | null = null;
+    for (const p of paymentsQ.all(b.ledger_id, b.ref, asOf) as { date: string; paid: number }[]) {
+      const part = Math.min(pending, p.paid);
+      interest += interestOn(part, daysBetween(due, p.date));
+      pending -= part;
+      lastPaid = p.date;
+    }
+    interest += interestOn(pending, daysBetween(due, asOf));
+    const lateDays = Math.max(0, daysBetween(due, pending > 0 ? asOf : (lastPaid ?? asOf)));
+    return { ...b, pending, msme_due: due, late_days: lateDays, interest, paid_late: pending <= 0 };
+  }).filter((b) => b.late_days > 0 && (b.pending > 0 || (b.bill_date >= fyStart && b.interest > 0) || (b.bill_date >= fyStart && rate === 0)))
+    .sort((a, b) => b.late_days - a.late_days);
 
   // Section 43B(h): our own purchases from MSME suppliers must be paid within the same limit to stay tax-deductible.
   const msmePayables = pending
@@ -214,6 +273,7 @@ export function alerts(books: Books, asOf = todayISO()) {
     overdue,
     overdueTotal: overdue.reduce((a, b) => a + b.pending, 0),
     msmeReceivables,
+    msmeNote: 'Interest under the MSMED Act can be claimed only if your Udyam registration is as a manufacturer or service provider. Traders are generally not covered, so treat these figures as a guide.',
     msmePayables,
     expiringBatches,
     lowStock,

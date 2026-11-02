@@ -10,7 +10,9 @@ export const STATES: Record<string, string> = {
   '36': 'Telangana', '37': 'Andhra Pradesh', '38': 'Ladakh', '97': 'Other Territory',
 };
 
-export const GST_RATES = [0, 0.25, 3, 5, 12, 18, 28, 40];
+// Rate slabs after GST 2.0 (22 Sept 2025): 5%, 18% and 40% for most goods; 12% and 28% were removed.
+// They stay in the list only so old entries and imported masters still show correctly.
+export const GST_RATES = [0, 0.25, 3, 5, 18, 40, 12, 28];
 
 const GSTIN_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 

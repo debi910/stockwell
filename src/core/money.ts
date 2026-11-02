@@ -10,7 +10,10 @@ export function toPaise(rupees: number | string): Paise {
     rupees = Number(clean);
   }
   if (!Number.isFinite(rupees)) throw new Error(`Not a valid amount: ${rupees}`);
-  return Math.round(rupees * 100);
+  // Go through the decimal text so 1.005 becomes 101 paise, not 100 (binary floating point).
+  const [whole, frac = ''] = Math.abs(rupees).toFixed(6).split('.');
+  const paise = Number(whole) * 100 + Number(frac.slice(0, 2)) + (Number(frac[2] ?? 0) >= 5 ? 1 : 0);
+  return rupees < 0 ? -paise : paise;
 }
 
 export function toRupees(paise: Paise): number {

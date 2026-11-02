@@ -1,3 +1,4 @@
+import { BooksError } from './books';
 import { XMLParser } from 'fast-xml-parser';
 import type { Books } from './books';
 import { STATES, isValidGstin } from '../core/gst';
@@ -8,8 +9,25 @@ export const TALLY_MASTERS_REQUEST = `<ENVELOPE><HEADER><TALLYREQUEST>Export Dat
 <REPORTNAME>List of Accounts</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 <ACCOUNTTYPE>All Masters</ACCOUNTTYPE></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
 
+/** Tally's own server on this PC or another office PC. Anything else (the internet, odd schemes) is refused. */
+export function checkTallyUrl(raw: string): string {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw new BooksError('Tally address should look like http://localhost:9000'); }
+  const h = u.hostname.replace(/^\[|\]$/g, '');
+  const local = h === 'localhost' || h === '::1' || /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^169\.254\./.test(h) || !h.includes('.');
+  if (u.protocol !== 'http:' || !local) throw new BooksError('Tally must be on this PC or another PC in the office (for example http://localhost:9000).');
+  return u.toString();
+}
+
 export async function fetchTallyMasters(url = 'http://localhost:9000'): Promise<string> {
-  const res = await fetch(url, { method: 'POST', body: TALLY_MASTERS_REQUEST, headers: { 'Content-Type': 'text/xml' } });
+  let res: Response;
+  try {
+    res = await fetch(checkTallyUrl(url), { method: 'POST', body: TALLY_MASTERS_REQUEST, headers: { 'Content-Type': 'text/xml' }, signal: AbortSignal.timeout(15000) });
+  } catch (e) {
+    if (e instanceof BooksError) throw e;
+    throw new BooksError('Could not reach Tally. Open TallyPrime with the company loaded, and turn on F1 > Settings > Connectivity > "TallyPrime acts as: Both" on port 9000.');
+  }
   if (!res.ok) throw new Error(`Tally replied with HTTP ${res.status}.`);
   return res.text();
 }
