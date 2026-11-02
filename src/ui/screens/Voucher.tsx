@@ -72,7 +72,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   const [partyId, setPartyId] = useState<number | null>(null);
   const [accountId, setAccountId] = useState<number | null>(null);
   const [lines, setLines] = useState<ItemLine[]>([blankItem()]);
-  const [acc, setAcc] = useState<AccLine[]>([blankAcc()]);
+  const [acc, setAcc] = useState<AccLine[]>(() => [blankAcc(initialType === 'journal' ? 'Dr' : 'Cr')]);
   const [narration, setNarration] = useState('');
   const [refNo, setRefNo] = useState('');
   const [againstRef, setAgainstRef] = useState('');
@@ -82,6 +82,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   const [last, setLast] = useState<any>(null);
   const [billEdit, setBillEdit] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(!id && !copyFrom);
+  const [cancelled, setCancelled] = useState(false);
   const narrationRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLDivElement>(null);
   const label = VOUCHER_LABEL[type];
@@ -95,6 +96,8 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   useEffect(() => { if (active) reloadMasters(); }, [active, reloadMasters]);
 
   const date = parseDate(dateText, nav.workDate);
+  // F2 changes the date of the voucher being entered, as in Tally.
+  useEffect(() => { if (!id) setDateText(shortDate(nav.workDate)); }, [nav.workDate, id]);
 
   useEffect(() => {
     if (!id && date) api.get(`/api/vouchers/next-number?type=${type}&date=${date}`).then((r) => setNumber(r.number));
@@ -119,14 +122,14 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     const copy = !id;
     api.get(`/api/vouchers/${src}`).then((v) => {
       setType(v.type);
-      if (!copy) { setNumber(v.number); setDateText(shortDate(v.date)); setRefNo(v.ref_no ?? ''); setVehicle(v.vehicle_no ?? ''); }
+      if (!copy) { setCancelled(!!v.cancelled); setNumber(v.number); setDateText(shortDate(v.date)); setRefNo(v.ref_no ?? ''); setVehicle(v.vehicle_no ?? ''); }
       setNarration(v.narration ?? '');
       if (!copy) setDistance(v.distance_km ? String(v.distance_km) : '');
       if (INVENTORY.includes(v.type)) {
         setPartyId(v.party_id);
         setAccountId(v.account_id);
         setLines([...v.lines.map((l: any) => ({
-          key: keySeq++, itemId: l.item_id, batchId: copy && v.type === 'sales' ? null : l.batch_id, batchNo: copy && v.type === 'sales' ? '' : l.batch_no ?? '', expiry: copy && v.type === 'sales' ? '' : l.expiry_date ?? '',
+          key: keySeq++, itemId: l.item_id, batchId: copy && v.type === 'sales' ? null : l.batch_id, batchNo: copy && v.type === 'sales' ? '' : l.batch_no ?? '', expiry: copy && v.type === 'sales' ? '' : l.expiry_date ? shortDate(l.expiry_date) : '',
           qty: String(l.qty), free: l.free_qty ? String(l.free_qty) : '', freeTouched: true, rate: rupeesText(l.rate), disc: l.discount_pct ? String(l.discount_pct) : '',
         })), blankItem()]);
         const agst = v.bills.find((b: any) => b.kind === 'agst');
@@ -219,7 +222,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   // ---------- save ----------
   const reset = () => {
     setLines([blankItem()]);
-    setAcc([blankAcc()]);
+    setAcc([blankAcc(type === 'journal' ? 'Dr' : 'Cr')]);
     setPartyId(null);
     setNarration('');
     setRefNo('');
@@ -229,14 +232,24 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     setTimeout(() => (formRef.current?.querySelector('input.f') as HTMLElement | null)?.focus(), 50);
   };
 
+  // Enter at the end of a voucher asks "Accept?", as Tally does; Ctrl+A saves straight away.
+  const askAccept = async () => { if (await confirmBox('Accept?', { yes: 'Yes', no: 'No' })) save(); };
   const saving = useRef(false);
   const save = async () => {
     if (saving.current) return; // a second Ctrl+A while saving must not make a second voucher
     if (!date) { nav.toast('Enter a valid date', true); return; }
+    if (inventory) {
+      const noQty = lines.find((l) => l.itemId && !(Number(l.qty) > 0));
+      if (noQty) { nav.toast(`Enter a quantity for ${itemById(noQty.itemId)?.name ?? 'the item'}, or remove the line with Ctrl+D.`, true); return; }
+      const noRate = lines.find((l) => l.itemId && l.rate.trim() === '' && !['sales_order', 'purchase_order'].includes(type));
+      if (noRate) { nav.toast(`Enter a rate for ${itemById(noRate.itemId)?.name ?? 'the item'} (type 0 if it is free).`, true); return; }
+    }
     saving.current = true;
     try { await doSave(); } finally { saving.current = false; }
   };
   const doSave = async () => {
+    const badExpiry = inventory && filledLines.find((l) => l.expiry && !parseDate(l.expiry, date ?? undefined));
+    if (badExpiry) { nav.toast(`The expiry date "${badExpiry.expiry}" is not a date. Type it like 30-11-27.`, true); return; }
     const body: any = { type, date, narration };
     if (id || numberTyped.current) body.number = number;
     if (!id) body.clientKey = clientKey.current;
@@ -244,7 +257,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       Object.assign(body, {
         partyId, accountId: BOOKS.includes(type) ? accountId : undefined, refNo, againstRef: againstRef || undefined, vehicleNo: vehicle, distanceKm: Number(distance) || 0,
         lines: filledLines.map((l) => ({
-          itemId: l.itemId, batchId: l.batchId || undefined, batchNo: l.batchNo || undefined, expiryDate: l.expiry || undefined,
+          itemId: l.itemId, batchId: l.batchId || undefined, batchNo: l.batchNo || undefined, expiryDate: l.expiry ? parseDate(l.expiry, date ?? undefined) ?? undefined : undefined,
           qty: Number(l.qty), freeQty: Number(l.free) || 0, rate: toPaise(l.rate || 0), discountPct: Number(l.disc) || 0,
         })),
       });
@@ -350,7 +363,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   return (
     <div className="voucher" data-form ref={formRef}>
       <div className="vhead">
-        <div><span className="vtype">{label}</span><span className="vno">No. <input className="f" style={{ width: 150, display: 'inline-block' }} aria-label="Voucher number" value={number} onChange={(e) => { numberTyped.current = true; setNumber(e.target.value); }} onKeyDown={enterNext} /></span></div>
+        <div><span className="vtype">{label}</span>{cancelled && <span className="tag bad" style={{ marginLeft: 8 }}>CANCELLED</span>}<span className="vno">No. <input className="f" style={{ width: 150, display: 'inline-block' }} aria-label="Voucher number" value={number} onChange={(e) => { numberTyped.current = true; setNumber(e.target.value); }} onKeyDown={enterNext} /></span></div>
         {last && !id && (
           <div className="subtle">
             Last saved: <b>{last.number}</b> ₹{formatINR(last.total)}{' '}
@@ -406,11 +419,13 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
                         STOCK_IN.includes(type) ? (
                           <div style={{ display: 'flex', gap: 4 }}>
                             <input className="f" aria-label={`Batch ${idx + 1}`} placeholder="Batch" value={l.batchNo} onChange={(e) => setLine(l.key, { batchNo: e.target.value })} onKeyDown={enterNext} />
-                            <input className="f" aria-label={`Expiry ${idx + 1}`} placeholder="Expiry" title="Expiry date, e.g. 30-11-26" value={l.expiry ? shortDate(l.expiry) : ''} onChange={(e) => setLine(l.key, { expiry: parseDate(e.target.value) ?? '' })} onKeyDown={enterNext} />
+                            <input className="f" aria-label={`Expiry ${idx + 1}`} placeholder="Expiry" title="Expiry date, e.g. 30-11-26" value={l.expiry} onChange={(e) => setLine(l.key, { expiry: e.target.value })}
+                              onBlur={(e) => { const d = parseDate(e.target.value, date ?? undefined); if (d) setLine(l.key, { expiry: shortDate(d) }); }} onKeyDown={enterNext} />
                           </div>
                         ) : (
                           <Combo name={`Batch ${idx + 1}`} title="Batches (soonest expiry first)" value={l.batchId} onChange={(v) => setLine(l.key, { batchId: v })}
-                            options={bl.filter((b) => b.qty > 0 || b.id === l.batchId).map((b) => ({ id: b.id, label: b.batch_no, meta: `${b.qty} left${b.expiry_date ? ` · exp ${shortDate(b.expiry_date)}` : ''}` }))} placeholder="Auto (FEFO)" />
+                            onEmptyEnter={() => focusNext(document.activeElement as HTMLElement)}
+                            options={bl.filter((b) => (b.qty > 0 && !(type === 'sales' && b.expiry_date && date && b.expiry_date < date)) || b.id === l.batchId).map((b) => ({ id: b.id, label: b.batch_no, meta: `${b.qty} left${b.expiry_date ? ` · exp ${shortDate(b.expiry_date)}` : ''}` }))} placeholder="Auto (FEFO)" />
                         )
                       ) : <span className="subtle">—</span>}
                     </td>
@@ -428,13 +443,13 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
           <div className="vtotals">
             <div>
               <div className="row"><label>Narration</label><textarea ref={narrationRef} className="f" aria-label="Narration" rows={2} value={narration} onChange={(e) => setNarration(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (showEway) focusNext(e.currentTarget); else save(); } }} /></div>
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (showEway) focusNext(e.currentTarget); else askAccept(); } }} /></div>
               {type === 'sales' && (
                 <div className="row"><label>Vehicle / distance</label>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <input className="f" aria-label="Vehicle number" placeholder="Vehicle no." value={vehicle} onChange={(e) => setVehicle(e.target.value.toUpperCase())} onKeyDown={enterNext} />
                     <input className="f num" aria-label="Distance km" placeholder="km" style={{ width: 80 }} value={distance} onChange={(e) => setDistance(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }} />
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); askAccept(); } }} />
                   </div>
                 </div>
               )}
@@ -478,10 +493,10 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
                 return (
                   <tr key={l.key} data-line={l.key}>
                     {type === 'journal' && <td>
-                      <select className="f" aria-label={`Side ${idx + 1}`} value={l.side} onChange={(e) => setAccLine(l.key, { side: e.target.value as 'Dr' | 'Cr' })} onKeyDown={enterNext}><option>Dr</option><option>Cr</option></select>
+                      <select className="f" aria-label={`Side ${idx + 1}`} autoFocus={idx === 0 && !id} value={l.side} onChange={(e) => setAccLine(l.key, { side: e.target.value as 'Dr' | 'Cr' })} onKeyDown={enterNext}><option>Dr</option><option>Cr</option></select>
                     </td>}
                     <td>
-                      <Combo name={`Particulars ${idx + 1}`} title="List of Ledger Accounts" value={l.ledgerId} options={options} autoFocus={type === 'journal' && idx === 0 && !id}
+                      <Combo name={`Particulars ${idx + 1}`} title="List of Ledger Accounts" value={l.ledgerId} options={options} autoFocus={false}
                         onChange={(v) => { setAccLine(l.key, { ledgerId: v, bills: null }); if (isBillWise(v)) loadPending(v); }}
                         onCreate={(typed) => nav.push({ name: 'ledger-form', props: { name: typed, onSaved: (x: any) => { reloadMasters(); setAccLine(l.key, { ledgerId: x.id }); } } })}
                         onEmptyEnter={() => narrationRef.current?.focus()} />
@@ -504,7 +519,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
           </table>
           <div className="vtotals">
             <div className="row"><label>Narration</label><textarea ref={narrationRef} className="f" aria-label="Narration" rows={2} value={narration} onChange={(e) => setNarration(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); } }} /></div>
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); askAccept(); } }} /></div>
             <table><tbody>
               {type === 'journal'
                 ? <><tr><td>Debit</td><td className="num">{formatINR(drTotal())}</td></tr><tr><td>Credit</td><td className="num">{formatINR(crTotal())}</td></tr>

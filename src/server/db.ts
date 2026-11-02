@@ -1,4 +1,13 @@
 import Database from 'better-sqlite3';
+import { parseDate } from '../core/dates';
+
+/** dd-mm-yy or dd-mm-yyyy as typed into an early build; a two-digit year is 20yy. */
+function parseExpiry(t: string): string | null {
+  const m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/.exec(t.trim());
+  if (!m) return null;
+  const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+  return parseDate(`${m[1]}-${m[2]}-${y}`);
+}
 import { DEFAULT_GROUPS, DEFAULT_LEDGERS, DEFAULT_UNITS } from '../core/groups';
 
 export type DB = Database.Database;
@@ -222,6 +231,10 @@ function migrate(db: DB) {
   add('company', 'allow_negative_stock', 'INTEGER NOT NULL DEFAULT 0');
   add('company', 'last_backup', "TEXT NOT NULL DEFAULT ''");
   add('vouchers', 'client_key', 'TEXT');
+  // Early builds stored an opening batch expiry exactly as typed (e.g. 15-12-26); turn those into real dates.
+  for (const b of db.prepare(`SELECT id, expiry_date FROM batches WHERE expiry_date IS NOT NULL AND expiry_date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`).all() as { id: number; expiry_date: string }[]) {
+    db.prepare(`UPDATE batches SET expiry_date=? WHERE id=?`).run(parseExpiry(b.expiry_date), b.id);
+  }
   // Group names exactly as TallyPrime spells them, so Tally imports and staff habits line up.
   db.prepare(`UPDATE groups SET name='Branch/Divisions' WHERE name='Branch / Divisions'`).run();
   db.prepare(`UPDATE groups SET name='Misc. Expenses (ASSET)' WHERE name='Misc. Expenses (Asset)'`).run();

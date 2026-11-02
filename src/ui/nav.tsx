@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useRef } from 'react';
 export interface Screen {
   name: string;
   props?: Record<string, any>;
+  uid?: number;
 }
 
 export interface KeyAction {

@@ -80,7 +80,15 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
         autoFocus={autoFocus}
         autoComplete="off"
         onFocus={(e) => { setOpen(true); e.currentTarget.select(); const i = options.findIndex((o) => o.id === current?.id); setSel(i >= 0 ? i : 0); }}
-        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onBlur={() => {
+          // Typed a whole name (or narrowed the list to one) and left with Tab: take it, as Enter would.
+          const t = text.trim().toLowerCase();
+          if (open && t && t !== (current?.label.toLowerCase() ?? '')) {
+            const exact = options.find((o) => o.label.toLowerCase() === t) ?? (filtered.length === 1 ? filtered[0] : undefined);
+            if (exact) onChange(exact.id, exact);
+          }
+          setTimeout(() => setOpen(false), 120);
+        }}
         onChange={(e) => { setText(e.target.value); setOpen(true); setSel(0); }}
         onKeyDown={(e) => {
           if (e.altKey && (e.key === 'c' || e.key === 'C') && onCreate) { e.preventDefault(); e.stopPropagation(); setOpen(false); onCreate(text === current?.label ? '' : text); return; }

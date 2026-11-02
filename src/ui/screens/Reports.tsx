@@ -5,9 +5,10 @@ import { confirmBox } from '../components/Dialog';
 import { VOUCHER_LABEL, drCr, financialYear, formatINR, parseDate, shortDate } from '../format';
 
 /** Arrow keys move through rows; Enter opens the selected one. */
-function useRows<T>(rows: T[], open: (r: T) => void) {
+function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolean) {
   const [sel, setSel] = useState(0);
   useScreenKeys((e) => {
+    if (e.key === 'Escape' && onEsc?.()) return true; // close a pop-up first, not the report
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) {
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false;
     }
@@ -122,6 +123,14 @@ export function TrialBalance({ active }: { active: boolean }) {
   const { sel, setSel } = useRows(rows, drill);
   useKeyBar([{ key: 'Alt+F1', label: detailed ? 'Condensed' : 'Detailed', run: () => setDetailed((d) => !d) }], [detailed]);
   if (!data) return null;
+  // As in Tally, the Grand Total is the sum of the group closing balances shown (each group nets its own ledgers),
+  // so the column adds up on paper.
+  const totals = { dr: 0, cr: 0 };
+  const add = (v: number) => { if (v > 0) totals.dr += v; else totals.cr -= v; };
+  for (const g of data.tree as Node[]) add(g.balance);
+  add(data.profitLossAc);
+  add(data.openingStock);
+  add(-data.openingDiff);
   return (
     <div className="report">
       <div className="toolbar"><Period to={to} single onChange={(_, t) => setTo(t)} /></div>
@@ -138,7 +147,7 @@ export function TrialBalance({ active }: { active: boolean }) {
           {data.profitLossAc !== 0 && <tr className="group"><td>Profit &amp; Loss A/c</td><td className="num">{data.profitLossAc > 0 ? formatINR(data.profitLossAc) : ''}</td><td className="num">{data.profitLossAc < 0 ? formatINR(-data.profitLossAc) : ''}</td></tr>}
           {data.openingStock > 0 && <tr><td>Opening Stock</td><td className="num">{formatINR(data.openingStock)}</td><td /></tr>}
           {data.openingDiff !== 0 && <tr><td><span className="tag warn">Difference in opening balances</span></td><td className="num">{data.openingDiff < 0 ? formatINR(-data.openingDiff) : ''}</td><td className="num">{data.openingDiff > 0 ? formatINR(data.openingDiff) : ''}</td></tr>}
-          <tr className="total"><td>Grand Total</td><td className="num">{formatINR(data.totalDr + Math.max(0, -data.openingDiff))}</td><td className="num">{formatINR(data.totalCr + Math.max(0, data.openingDiff))}</td></tr>
+          <tr className="total"><td>Grand Total</td><td className="num">{formatINR(totals.dr)}</td><td className="num">{formatINR(totals.cr)}</td></tr>
         </tbody>
       </table>
     </div>
@@ -310,7 +319,8 @@ export function StockSummary({ active }: { active: boolean }) {
   const [batchesOf, setBatchesOf] = useState<any>(null);
   useTitle('Stock Summary');
   useEffect(() => { if (active) api.get(`/api/reports/stock-summary?to=${to}`).then(setRows); }, [active, to]);
-  const { sel, setSel } = useRows(rows, async (r: any) => setBatchesOf({ item: r, list: await api.get(`/api/items/${r.id}/batches?asOf=${to}`) }));
+  const { sel, setSel } = useRows(rows, async (r: any) => setBatchesOf({ item: r, list: await api.get(`/api/items/${r.id}/batches?asOf=${to}`) }),
+    () => { if (!batchesOf) return false; setBatchesOf(null); return true; });
   const groups = [...new Set(rows.map((r) => r.stock_group ?? 'Other items'))];
   const total = rows.reduce((a, r) => a + r.value, 0);
   let idx = -1;

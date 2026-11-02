@@ -161,6 +161,35 @@ describe('a billing day', () => {
     await page.keyboard.press('Escape');
   });
 
+  it('never saves a voucher that was thrown away', async () => {
+    const count = async () => (await (await fetch(`${base}/api/reports/day-book?from=${todayISO()}&to=${todayISO()}`)).json()).length;
+    const before = await count();
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('F8');
+    await pick('Party', 'Ramesh');
+    await pick('Item 1', 'Ghee');
+    await type('Quantity 1', '2');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('y');
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('F10');
+    await page.getByRole('menu', { name: 'Change Voucher Type' }).waitFor();
+    await page.keyboard.press('Control+a');
+    await page.waitForTimeout(500);
+    expect(await count()).toBe(before);
+    await page.keyboard.press('Escape');
+  });
+
+  it('starts a Journal on Dr, in the Dr/Cr column', async () => {
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('F7');
+    await field('Side 1').waitFor();
+    expect(await field('Side 1').inputValue()).toBe('Dr');
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('Side 1');
+    await page.keyboard.press('Escape');
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+  });
+
   it('turns on logins and keeps the operator out of profit reports', async () => {
     await page.keyboard.press('F3');
     await page.getByRole('button', { name: 'Users and passwords' }).click();

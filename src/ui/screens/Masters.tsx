@@ -4,7 +4,7 @@ import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
 import { promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
-import { drCr, formatINR, isValidGstin, rupeesText, toPaise } from '../format';
+import { drCr, formatINR, isValidGstin, parseDate, rupeesText, toPaise } from '../format';
 
 /** Ctrl+A saves; a second press while the first save is still going is ignored, so nothing is saved twice. */
 function useSave(save: () => Promise<void>) {
@@ -142,7 +142,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         scheme_buy: Number(it.scheme_buy) || 0, scheme_free: Number(it.scheme_free) || 0,
         opening_qty: Number(it.opening_qty) || 0, opening_value: openingValue,
         mrp: toPaise(money.mrp || 0), sale_rate: toPaise(money.sale_rate || 0), purchase_rate: toPaise(money.purchase_rate || 0),
-        opening_batch_no: batch.no, opening_expiry: batch.expiry || null,
+        opening_batch_no: batch.no, opening_expiry: batch.expiry ? parseDate(batch.expiry) ?? batch.expiry : null,
       };
       const saved = id ? await api.put(`/api/items/${id}`, body) : await api.post('/api/items', body);
       nav.toast(`Item "${saved.name}" saved`);
@@ -192,7 +192,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         <Row label="Value"><span className="num">{formatINR(openingValue)}</span></Row>
         {!id && !!it.track_batch && <>
           <Row label="Opening batch no."><Text name="Opening batch" value={batch.no} onChange={(v) => setBatch((b) => ({ ...b, no: v }))} /></Row>
-          <Row label="Expiry (YYYY-MM-DD)"><Text name="Opening expiry" value={batch.expiry} onChange={(v) => setBatch((b) => ({ ...b, expiry: v }))} /></Row>
+          <Row label="Expiry (e.g. 30-11-27)"><Text name="Opening expiry" value={batch.expiry} onChange={(v) => setBatch((b) => ({ ...b, expiry: v }))} /></Row>
         </>}
       </div>
       <div className="actions">

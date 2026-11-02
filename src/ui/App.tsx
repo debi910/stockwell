@@ -43,6 +43,9 @@ export function App() {
   return <>{toaster}<Books user={session.user} onLogout={session.usersEnabled ? logout : undefined} /></>;
 }
 
+/** Each opened screen gets its own id, so a replaced screen always starts fresh. */
+let screenSeq = 0;
+
 function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   const [stack, setStack] = useState<Screen[]>([{ name: 'gateway' }]);
   const stackRef = useRef(stack);
@@ -63,12 +66,20 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     window.stockwell?.connection().then((c) => setConn(c.mode === 'main' ? `Main PC · others connect to ${c.lanAddresses[0] ?? 'this PC'}:7400` : `Connected to ${c.address}`));
   }, [refreshCompany]);
 
+  // A screen's keys and title belong to that screen only: forget them the moment it closes or is
+  // replaced, so the next screen never inherits (say) the closed voucher's Ctrl+A.
+  const forgetFrom = (depth: number) => {
+    const drop = <T,>(o: Record<number, T>) => Object.fromEntries(Object.entries(o).filter(([d]) => Number(d) < depth)) as Record<number, T>;
+    setScreenKeysState(drop);
+    setTitles(drop);
+    for (const d of Object.keys(handlers.current)) if (Number(d) >= depth) handlers.current[Number(d)] = null;
+  };
   const nav: Nav = useMemo(() => ({
     stack,
-    push: (s) => setStack((st) => [...st, s]),
-    pop: () => setStack((st) => (st.length > 1 ? st.slice(0, -1) : st)),
-    replace: (s) => setStack((st) => [...st.slice(0, -1), s]),
-    home: () => setStack((st) => st.slice(0, 1)),
+    push: (s) => { forgetFrom(stackRef.current.length); setStack((st) => [...st, { ...s, uid: ++screenSeq }]); },
+    pop: () => { if (stackRef.current.length > 1) forgetFrom(stackRef.current.length - 1); setStack((st) => (st.length > 1 ? st.slice(0, -1) : st)); },
+    replace: (s) => { forgetFrom(stackRef.current.length - 1); setStack((st) => [...st.slice(0, -1), { ...s, uid: ++screenSeq }]); },
+    home: () => { forgetFrom(1); setStack((st) => st.slice(0, 1)); },
     toast: (text, error) => (error ? toast.error(text, { duration: 6000 }) : toast.success(text)),
     user,
     company, meta, refreshCompany, workDate, setWorkDate,
@@ -144,7 +155,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
           {stack.map((s, i) => {
             const C = SCREENS[s.name];
             return (
-              <DepthContext.Provider key={i + s.name} value={i}>
+              <DepthContext.Provider key={`${i}-${s.name}-${s.uid ?? 0}`} value={i}>
                 <div style={{ display: i === top ? 'block' : 'none', height: '100%' }}>
                   <ErrorBoundary onBack={() => nav.pop()}>
                     {C ? <C {...(s.props ?? {})} active={i === top} /> : <div className="empty-state">Unknown screen {s.name}</div>}
@@ -188,6 +199,8 @@ function DatePrompt({ current, onDone }: { current: string; onDone: (d: string |
         <input
           className="f" autoFocus value={text} onChange={(e) => setText(e.target.value)} onFocus={(e) => e.currentTarget.select()}
           onKeyDown={(e) => {
+            // This box owns these keys: Enter must not also open whatever is selected behind it.
+            if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }
             if (e.key === 'Escape') onDone(null);
             if (e.key === 'Enter') {
               const d = parseDate(text, current);

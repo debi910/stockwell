@@ -74,3 +74,16 @@ describe('TallyPrime voucher types', () => {
     await expect(ctx.call('POST', `/api/vouchers/${p2.id}/cancel`)).rejects.toThrow(/below zero/);
   });
 });
+
+describe('Trial Balance', () => {
+  it('group totals add up to the same Grand Total on both sides', async () => {
+    await ctx.call('POST', '/api/vouchers', { type: 'sales', date: '2026-10-10', partyId: m.ramesh.id, lines: [{ itemId: m.ghee.id, qty: 3, rate: 60000, freeQty: 0 }] });
+    await ctx.call('POST', '/api/vouchers', { type: 'receipt', date: '2026-10-11', accountId: m.bank.id, entries: [{ ledgerId: m.ramesh.id, amount: 50000 }] });
+    const tb = await ctx.call('GET', '/api/reports/trial-balance?asOf=2026-10-31');
+    let dr = 0; let cr = 0;
+    const add = (v: number) => { if (v > 0) dr += v; else cr -= v; };
+    for (const g of tb.tree) add(g.balance);
+    add(tb.profitLossAc); add(tb.openingStock); add(-tb.openingDiff);
+    expect(dr).toBe(cr);
+  });
+});

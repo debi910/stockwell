@@ -13,6 +13,14 @@ export class BooksError extends Error {
 const fail = (msg: string): never => {
   throw new BooksError(msg);
 };
+/** A date as YYYY-MM-DD that really exists, or null when empty; anything else is refused. */
+const isoDate = (v: unknown, what: string): string | null => {
+  if (v === undefined || v === null || v === '') return null;
+  const t = String(v);
+  const d = new Date(`${t}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(t) || Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== t) fail(`${what} is not a valid date.`);
+  return t;
+};
 
 export type VoucherType =
   | 'sales' | 'purchase' | 'credit_note' | 'debit_note'
@@ -327,7 +335,7 @@ export class Books {
       const item = this.createItemRow(input);
       if (item.track_batch && item.opening_qty) {
         this.db.prepare(`INSERT INTO batches (item_id, batch_no, expiry_date, opening_qty) VALUES (?, ?, ?, ?)`)
-          .run(item.id, input.opening_batch_no?.trim() || 'Opening', input.opening_expiry || null, item.opening_qty);
+          .run(item.id, input.opening_batch_no?.trim() || 'Opening', isoDate(input.opening_expiry, 'The opening batch expiry'), item.opening_qty);
       }
       return item;
     })();
@@ -398,7 +406,7 @@ export class Books {
     const existing = this.db.prepare(`SELECT id FROM batches WHERE item_id=? AND batch_no=?`).get(itemId, l.batchNo) as { id: number } | undefined;
     if (existing) return existing.id;
     const r = this.db.prepare(`INSERT INTO batches (item_id, batch_no, mfg_date, expiry_date) VALUES (?, ?, ?, ?)`)
-      .run(itemId, l.batchNo, l.mfgDate ?? null, l.expiryDate ?? null);
+      .run(itemId, String(l.batchNo).slice(0, 40), isoDate(l.mfgDate, 'The manufacturing date'), isoDate(l.expiryDate, `The expiry date of batch ${l.batchNo}`));
     return Number(r.lastInsertRowid);
   }
 
@@ -621,7 +629,7 @@ export class Books {
     if (vt.stock) {
       header = { ...header, ...this.stockLines(type, input, excludeId, invLines, company.allow_negative_stock) };
     } else if (vt.inventory) {
-      const party = this.ledger(num(input.partyId, 'party') || fail('Choose the party (customer or supplier).'));
+      const party = this.ledger(input.partyId == null || (input.partyId as unknown) === '' ? fail('Choose the party (customer or supplier).') : num(input.partyId, 'party'));
       const account = vt.books
         ? this.ledger(input.accountId ?? (type === 'sales' || type === 'credit_note' ? this.ledgerByName('Sales')?.id : this.ledgerByName('Purchase')?.id) ?? fail('Choose the sales or purchase ledger.'))
         : null;
@@ -683,7 +691,15 @@ export class Books {
           prepared.push({ ...base, batchId: bid });
           continue;
         }
-        if (l.batchId) { prepared.push({ ...base, batchId: this.ownBatch(item.id, l.batchId) }); continue; }
+        if (l.batchId) {
+          const bid = this.ownBatch(item.id, l.batchId);
+          if (type === 'sales') {
+            const b = this.db.prepare(`SELECT batch_no, expiry_date FROM batches WHERE id=?`).get(bid) as { batch_no: string; expiry_date: string | null };
+            if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${b.expiry_date}. Expired stock cannot be sold; send it back with Rejection Out or write it off with a Stock Journal.`);
+          }
+          prepared.push({ ...base, batchId: bid });
+          continue;
+        }
         // Outward without a chosen batch: take from the soonest-expiring batches that are not expired (FEFO),
         // splitting the line when one batch does not have enough.
         for (const part of this.allocateBatches(item, qty, free, input.date, excludeId)) prepared.push({ ...base, ...part });
@@ -760,7 +776,7 @@ export class Books {
         for (const e of lines) entries.push({ ledgerId: this.ledger(num(e?.ledgerId, 'ledger')).id, amount: amountOf(e.amount) });
         if (entries.some((e) => e.amount === 0)) fail('Each line needs an amount.');
       } else {
-        const account = this.ledger(num(input.accountId, 'account') || fail('Choose the cash or bank account.'));
+        const account = this.ledger(input.accountId == null || (input.accountId as unknown) === '' ? fail('Choose the cash or bank account.') : num(input.accountId, 'account'));
         // Receipt: money comes in, account is debited and particulars credited. Payment/contra: the reverse.
         const sign = type === 'receipt' ? -1 : 1;
         let sum = 0;

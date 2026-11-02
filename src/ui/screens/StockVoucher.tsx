@@ -26,6 +26,8 @@ export function StockVoucherForm({ type, id, active }: { type: 'stock_journal' |
   const [loaded, setLoaded] = useState(!id);
   const saving = useRef(false);
   const date = parseDate(dateText, nav.workDate);
+  // F2 changes the date of the voucher being entered, as in Tally.
+  useEffect(() => { if (!id) setDateText(shortDate(nav.workDate)); }, [nav.workDate, id]);
 
   useEffect(() => { if (active) api.get('/api/items').then(setItems).catch((e) => nav.toast(e.message, true)); }, [active]);
   useEffect(() => {
@@ -159,7 +161,7 @@ export function StockVoucherForm({ type, id, active }: { type: 'stock_journal' |
       <div className="vtotals">
         <div>
           <div className="row"><label>Narration</label><textarea className="f" aria-label="Narration" rows={2} value={narration} onChange={(e) => setNarration(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); } }} /></div>
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmBox('Accept?', { yes: 'Yes', no: 'No' }).then((y) => { if (y) save(); }); } }} /></div>
           <div className="hint" style={{ marginTop: 6 }}>Ctrl+D removes a line. Ctrl+A saves.</div>
         </div>
         {!physical && <table><tbody><tr className="grand"><td>Net value</td><td className="num">{formatINR(value)}</td></tr></tbody></table>}
