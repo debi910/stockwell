@@ -20,8 +20,10 @@ async function type(name: string, text: string) {
   await field(name).fill(text);
   await field(name).press('Enter');
 }
+/** Types into a pick list and presses Enter once the match is highlighted (lists load in the background). */
 async function pick(name: string, text: string) {
   await field(name).fill(text);
+  await page.locator('.picker .opt.sel').filter({ hasText: new RegExp(text, 'i') }).first().waitFor();
   await page.keyboard.press('Enter');
 }
 
@@ -62,7 +64,7 @@ describe('a billing day', () => {
     await pick('Under', 'Sundry Debtors');
     await snap('02-ledger');
     await page.keyboard.press('Control+a');
-    await expect(page.getByText('Ramesh General Store').first().waitFor({ timeout: 3000 })).resolves.toBeUndefined();
+    await page.getByRole('menu', { name: 'Create' }).waitFor();
     await page.keyboard.press('Escape');
   });
 
@@ -77,9 +79,10 @@ describe('a billing day', () => {
     await field('HSN').fill('0405');
     await snap('03-item');
     await page.keyboard.press('Control+a');
-    await page.waitForTimeout(300);
+    await page.getByText('Item "Patanjali Cow Ghee 1L" saved').first().waitFor();
+    await page.getByRole('menu', { name: 'Create' }).waitFor();
     await page.keyboard.press('Escape');
-    await page.keyboard.press('Escape');
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
   });
 
   it('makes a sales bill with F8 and the keyboard only', async () => {
