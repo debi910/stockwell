@@ -1,0 +1,227 @@
+import Database from 'better-sqlite3';
+import { DEFAULT_GROUPS, DEFAULT_LEDGERS, DEFAULT_UNITS } from '../core/groups';
+
+export type DB = Database.Database;
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+
+CREATE TABLE IF NOT EXISTS company (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  name TEXT NOT NULL DEFAULT 'My Company',
+  address TEXT DEFAULT '',
+  city TEXT DEFAULT '',
+  pincode TEXT DEFAULT '',
+  state_code TEXT NOT NULL DEFAULT '21',
+  gstin TEXT DEFAULT '',
+  phone TEXT DEFAULT '',
+  email TEXT DEFAULT '',
+  upi_id TEXT DEFAULT '',
+  bank_details TEXT DEFAULT '',
+  books_from TEXT NOT NULL DEFAULT '2026-04-01',
+  ewb_threshold INTEGER NOT NULL DEFAULT 5000000,
+  udyam_no TEXT DEFAULT '',
+  msme_interest_rate REAL DEFAULT 0,
+  expiry_alert_days INTEGER NOT NULL DEFAULT 30,
+  invoice_terms TEXT DEFAULT 'Goods once sold will not be taken back. Subject to local jurisdiction.',
+  backup_dir TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  parent_id INTEGER REFERENCES groups(id),
+  nature TEXT NOT NULL CHECK (nature IN ('asset','liability','income','expense')),
+  direct INTEGER NOT NULL DEFAULT 0,
+  builtin INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ledgers (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  opening INTEGER NOT NULL DEFAULT 0,
+  gstin TEXT DEFAULT '',
+  state_code TEXT DEFAULT '',
+  address TEXT DEFAULT '',
+  city TEXT DEFAULT '',
+  pincode TEXT DEFAULT '',
+  phone TEXT DEFAULT '',
+  credit_days INTEGER DEFAULT 0,
+  beat TEXT DEFAULT '',
+  salesman TEXT DEFAULT '',
+  msme_supplier INTEGER NOT NULL DEFAULT 0,
+  msme_buyer INTEGER NOT NULL DEFAULT 0,
+  udyam_no TEXT DEFAULT '',
+  tax_kind TEXT DEFAULT NULL,
+  builtin INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS units (
+  id INTEGER PRIMARY KEY,
+  symbol TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  name TEXT NOT NULL,
+  uqc TEXT NOT NULL DEFAULT 'OTH'
+);
+
+CREATE TABLE IF NOT EXISTS stock_groups (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+
+CREATE TABLE IF NOT EXISTS items (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  stock_group_id INTEGER REFERENCES stock_groups(id),
+  unit_id INTEGER NOT NULL REFERENCES units(id),
+  hsn TEXT DEFAULT '',
+  gst_rate REAL NOT NULL DEFAULT 0,
+  mrp INTEGER DEFAULT 0,
+  sale_rate INTEGER DEFAULT 0,
+  purchase_rate INTEGER DEFAULT 0,
+  track_batch INTEGER NOT NULL DEFAULT 0,
+  reorder_level REAL DEFAULT 0,
+  scheme_buy REAL DEFAULT 0,
+  scheme_free REAL DEFAULT 0,
+  opening_qty REAL NOT NULL DEFAULT 0,
+  opening_value INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS batches (
+  id INTEGER PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES items(id),
+  batch_no TEXT NOT NULL,
+  mfg_date TEXT DEFAULT NULL,
+  expiry_date TEXT DEFAULT NULL,
+  mrp INTEGER DEFAULT 0,
+  opening_qty REAL NOT NULL DEFAULT 0,
+  UNIQUE (item_id, batch_no)
+);
+
+CREATE TABLE IF NOT EXISTS vouchers (
+  id INTEGER PRIMARY KEY,
+  type TEXT NOT NULL,
+  number TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  party_id INTEGER REFERENCES ledgers(id),
+  account_id INTEGER REFERENCES ledgers(id),
+  narration TEXT DEFAULT '',
+  place_of_supply TEXT DEFAULT NULL,
+  intra INTEGER NOT NULL DEFAULT 1,
+  taxable INTEGER NOT NULL DEFAULT 0,
+  cgst INTEGER NOT NULL DEFAULT 0,
+  sgst INTEGER NOT NULL DEFAULT 0,
+  igst INTEGER NOT NULL DEFAULT 0,
+  round_off INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  ref_no TEXT DEFAULT '',
+  ref_date TEXT DEFAULT NULL,
+  vehicle_no TEXT DEFAULT '',
+  distance_km INTEGER DEFAULT 0,
+  transporter_name TEXT DEFAULT '',
+  transporter_id TEXT DEFAULT '',
+  ewb_no TEXT DEFAULT '',
+  cancelled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS vouchers_date ON vouchers(date);
+CREATE UNIQUE INDEX IF NOT EXISTS vouchers_number ON vouchers(type, number);
+
+CREATE TABLE IF NOT EXISTS entries (
+  id INTEGER PRIMARY KEY,
+  voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE,
+  ledger_id INTEGER NOT NULL REFERENCES ledgers(id),
+  amount INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS entries_ledger ON entries(ledger_id);
+CREATE INDEX IF NOT EXISTS entries_voucher ON entries(voucher_id);
+
+CREATE TABLE IF NOT EXISTS inventory (
+  id INTEGER PRIMARY KEY,
+  voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE,
+  line_no INTEGER NOT NULL,
+  item_id INTEGER NOT NULL REFERENCES items(id),
+  batch_id INTEGER REFERENCES batches(id),
+  qty REAL NOT NULL,
+  free_qty REAL NOT NULL DEFAULT 0,
+  rate INTEGER NOT NULL,
+  discount_pct REAL NOT NULL DEFAULT 0,
+  gst_rate REAL NOT NULL DEFAULT 0,
+  taxable INTEGER NOT NULL,
+  cgst INTEGER NOT NULL DEFAULT 0,
+  sgst INTEGER NOT NULL DEFAULT 0,
+  igst INTEGER NOT NULL DEFAULT 0,
+  direction INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS inventory_item ON inventory(item_id);
+
+CREATE TABLE IF NOT EXISTS bills (
+  id INTEGER PRIMARY KEY,
+  voucher_id INTEGER REFERENCES vouchers(id) ON DELETE CASCADE,
+  ledger_id INTEGER NOT NULL REFERENCES ledgers(id),
+  ref TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('new','agst','onacc')),
+  amount INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  due_date TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bills_ledger ON bills(ledger_id, ref);
+
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL DEFAULT (datetime('now')),
+  entity TEXT NOT NULL,
+  entity_id INTEGER,
+  action TEXT NOT NULL,
+  data TEXT,
+  user_name TEXT
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  role TEXT NOT NULL CHECK (role IN ('owner','operator')),
+  salt TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
+export function openDb(path: string): DB {
+  const db = new Database(path);
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
+  db.exec(SCHEMA);
+  migrate(db);
+  seed(db);
+  return db;
+}
+
+/** Small upgrades for databases made by older versions. */
+function migrate(db: DB) {
+  const cols = (db.prepare(`PRAGMA table_info(audit)`).all() as { name: string }[]).map((c) => c.name);
+  if (!cols.includes('user_name')) db.exec(`ALTER TABLE audit ADD COLUMN user_name TEXT`);
+}
+
+function seed(db: DB) {
+  const done = db.prepare(`SELECT value FROM meta WHERE key='seeded'`).get();
+  if (done) return;
+  const tx = db.transaction(() => {
+    db.prepare(`INSERT OR IGNORE INTO company (id) VALUES (1)`).run();
+    const insGroup = db.prepare(`INSERT INTO groups (name, parent_id, nature, direct, builtin) VALUES (?, ?, ?, ?, 1)`);
+    const idOf = (name: string) => (db.prepare(`SELECT id FROM groups WHERE name=?`).get(name) as { id: number }).id;
+    for (const g of DEFAULT_GROUPS) {
+      insGroup.run(g.name, g.parent ? idOf(g.parent) : null, g.nature, g.direct ? 1 : 0);
+    }
+    const insLedger = db.prepare(`INSERT INTO ledgers (name, group_id, tax_kind, builtin) VALUES (?, ?, ?, 1)`);
+    for (const l of DEFAULT_LEDGERS) insLedger.run(l.name, idOf(l.group), l.taxKind ?? null);
+    const insUnit = db.prepare(`INSERT INTO units (symbol, name, uqc) VALUES (?, ?, ?)`);
+    for (const u of DEFAULT_UNITS) insUnit.run(u.symbol, u.name, u.uqc);
+    db.prepare(`INSERT INTO meta (key, value) VALUES ('seeded', '1'), ('schema_version', '1')`).run();
+  });
+  tx();
+}

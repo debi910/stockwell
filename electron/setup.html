@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>Set up Stockwell</title>
+<style>
+  :root { --navy: #1f3a5f; --amber: #f2b33d; --cream: #fbf8f1; --ink: #1b2430; --muted: #5d6b7a; --line: #d9dee5; --danger: #b42318; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--navy); font: 14px/1.45 "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+  .card { width: 620px; background: #fff; border-radius: 10px; padding: 26px 28px; box-shadow: 0 20px 50px rgba(0,0,0,.3); animation: in 180ms cubic-bezier(.23,1,.32,1); }
+  @keyframes in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+  h1 { margin: 0 0 4px; font-size: 20px; color: var(--navy); }
+  p { color: var(--muted); margin: 6px 0 16px; }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .choice { border: 2px solid var(--line); border-radius: 8px; padding: 14px; cursor: pointer; background: #fff; text-align: left; font: inherit; transition: border-color 120ms ease-out; }
+  .choice:hover, .choice:focus { border-color: var(--navy); outline: none; }
+  .choice b { display: block; color: var(--navy); margin-bottom: 4px; font-size: 15px; }
+  .choice span { color: var(--muted); font-size: 13px; }
+  #client { display: none; margin-top: 16px; }
+  input { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; width: 220px; }
+  button.go { font: inherit; padding: 7px 14px; border-radius: 6px; border: 0; background: var(--navy); color: #fff; cursor: pointer; margin-left: 6px; }
+  .err { color: var(--danger); margin-top: 10px; min-height: 18px; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 14px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Set up Stockwell on this PC</h1>
+    <p>Choose once. The books live on one PC (the main PC). The other PC opens them over the office network, the same way TallyPrime works with two PCs.</p>
+    <div class="err" id="err"></div>
+    <div class="choices">
+      <button class="choice" id="main" autofocus><b>This is the main PC</b><span>The books are kept here. Keep this PC on while others work.</span></button>
+      <button class="choice" id="other"><b>Connect to the main PC</b><span>For the second PC. Needs the main PC's address, shown at the bottom of Stockwell on the main PC.</span></button>
+    </div>
+    <div id="client">
+      <label>Main PC address <input id="addr" placeholder="e.g. 192.168.1.10" /></label>
+      <button class="go" id="connect">Connect</button>
+      <div class="note" id="status"></div>
+    </div>
+    <div class="note" id="lan"></div>
+  </div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const err = document.getElementById('err');
+  if (q.get('error')) err.textContent = q.get('error');
+  const addr = document.getElementById('addr');
+  if (q.get('address')) addr.value = q.get('address');
+  const api = window.stockwellSetup;
+  api.lan().then((l) => { document.getElementById('lan').textContent = l.length ? 'This PC\'s address: ' + l.join(', ') : 'This PC is not on a network right now.'; });
+  document.getElementById('main').onclick = () => api.choose('main');
+  document.getElementById('other').onclick = () => { document.getElementById('client').style.display = 'block'; addr.focus(); };
+  const connect = async () => {
+    const a = addr.value.trim();
+    if (!a) return;
+    document.getElementById('status').textContent = 'Checking ' + a + '…';
+    if (await api.test(a)) api.choose('client', a);
+    else document.getElementById('status').textContent = 'No Stockwell found at ' + a + '. Check the address, that Stockwell is open on the main PC, and that Windows Firewall allows it there.';
+  };
+  document.getElementById('connect').onclick = connect;
+  addr.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+  if (q.get('address')) document.getElementById('client').style.display = 'block';
+</script>
+</body>
+</html>
