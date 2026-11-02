@@ -11,6 +11,8 @@ export function rupeesText(paise: number | null | undefined): string {
 export const VOUCHER_LABEL: Record<string, string> = {
   sales: 'Sales', purchase: 'Purchase', credit_note: 'Credit Note', debit_note: 'Debit Note',
   receipt: 'Receipt', payment: 'Payment', contra: 'Contra', journal: 'Journal',
+  sales_order: 'Sales Order', purchase_order: 'Purchase Order', rejection_in: 'Rejection In', rejection_out: 'Rejection Out',
+  stock_journal: 'Stock Journal', physical_stock: 'Physical Stock',
 };
 
 /** Moves focus to the next input in the form, like pressing Enter through Tally fields. */

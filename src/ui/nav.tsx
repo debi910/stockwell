@@ -10,6 +10,8 @@ export interface KeyAction {
   label: string;
   run?: () => void;
   disabled?: boolean;
+  /** Works but is not listed in the key bar. */
+  hidden?: boolean;
 }
 
 export interface Nav {

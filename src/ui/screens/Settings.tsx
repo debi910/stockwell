@@ -235,7 +235,7 @@ export function GstScreen({ active }: { active: boolean }) {
   };
 
   useKeyBar([
-    { key: 'F2', label: 'Earlier month', run: () => setPeriod((p) => shiftMonth(p, -1)) },
+    { key: 'Alt+F2', label: 'Earlier month', run: () => setPeriod((p) => shiftMonth(p, -1)) },
     { key: 'Shift+F2', label: 'Next month', run: () => setPeriod((p) => shiftMonth(p, 1)) },
     { key: '1', label: 'GSTR-1', run: () => setTab('gstr1') },
     { key: '3', label: 'GSTR-3B', run: () => setTab('gstr3b') },

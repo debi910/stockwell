@@ -124,6 +124,43 @@ describe('a billing day', () => {
     await page.keyboard.press('Escape');
   });
 
+  it('uses the TallyPrime voucher keys', async () => {
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    const title = () => page.locator('.screen-title, .titlebar, header + div').first().innerText();
+    for (const [key, name] of [['Alt+F6', 'Credit Note'], ['Alt+F5', 'Debit Note'], ['Control+F8', 'Sales Order'], ['Control+F9', 'Purchase Order'], ['Control+F6', 'Rejection In'], ['Control+F5', 'Rejection Out']]) {
+      await page.keyboard.press(key);
+      await page.getByText(`${name} Voucher Creation`).first().waitFor();
+      await page.keyboard.press('Escape');
+      await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    }
+    void title;
+  });
+
+  it('counts stock with Physical Stock (Ctrl+F7)', async () => {
+    await page.keyboard.press('Control+F7');
+    await page.getByText('Physical Stock Voucher Creation').first().waitFor();
+    await pick('Item 1', 'Ghee');
+    await type('Quantity 1', '34');
+    await page.keyboard.press('Control+a');
+    await page.getByText(/Physical Stock PS\/.* saved/).first().waitFor();
+    await page.keyboard.press('Escape');
+    const stock = await (await fetch(`${base}/api/reports/stock-summary?asOf=${todayISO()}`)).json();
+    expect(stock.find((s: any) => s.name === 'Patanjali Cow Ghee 1L').closing_qty).toBe(34);
+  });
+
+  it('finds any screen with Go To (Alt+G) and lists vouchers with F10', async () => {
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('Alt+g');
+    await field('Go To').fill('stock sum');
+    await page.keyboard.press('Enter');
+    await page.getByText('Patanjali Cow Ghee 1L').first().waitFor();
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('F10');
+    await page.getByRole('menu', { name: 'Change Voucher Type' }).waitFor();
+    await snap('10-voucher-types');
+    await page.keyboard.press('Escape');
+  });
+
   it('turns on logins and keeps the operator out of profit reports', async () => {
     await page.keyboard.press('F3');
     await page.getByRole('button', { name: 'Users and passwords' }).click();

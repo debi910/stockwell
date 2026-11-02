@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, openWhatsApp } from '../api';
-import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { confirmBox } from '../components/Dialog';
 import { VOUCHER_LABEL, drCr, financialYear, formatINR, parseDate, shortDate } from '../format';
 
 /** Arrow keys move through rows; Enter opens the selected one. */
@@ -46,7 +47,28 @@ export function DayBook({ active }: { active: boolean }) {
   useTitle('Day Book');
   useEffect(() => { if (active) api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows); }, [active, range]);
   const { sel, setSel } = useRows(rows, (r) => nav.push({ name: 'voucher', props: { type: r.type, id: r.id } }));
-  useKeyBar([{ key: 'F2', label: 'Period', run: () => (document.querySelector('[aria-label="From date"]') as HTMLInputElement)?.focus() }], []);
+  const reload = () => api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows);
+  const cur = rows[sel];
+  // TallyPrime's Day Book keys: Alt+2 duplicate, Alt+X cancel, Alt+D delete the selected voucher.
+  const act = async (what: 'dup' | 'cancel' | 'delete') => {
+    if (!cur) return;
+    if (what === 'dup') { nav.push({ name: 'voucher', props: { type: cur.type, copyFrom: cur.id } }); return; }
+    const label = `${VOUCHER_LABEL[cur.type]} ${cur.number}`;
+    if (what === 'cancel') {
+      if (cur.cancelled || !(await confirmBox(`Cancel ${label}?\nThe number stays used and the voucher shows as cancelled.`, { danger: true }))) return;
+      try { await api.post(`/api/vouchers/${cur.id}/cancel`); nav.toast(`${cur.number} cancelled`); reload(); } catch (e: any) { nav.toast(e.message, true); }
+      return;
+    }
+    const warn = cur.type === 'sales' ? '\nFor sales bills, Cancel (Alt+X) is usually better: GST wants every bill number accounted for.' : '';
+    if (!(await confirmBox(`Delete ${label}? This cannot be undone. A copy stays in the edit log.${warn}`, { yes: 'Delete', no: 'Keep', danger: true }))) return;
+    try { await api.del(`/api/vouchers/${cur.id}`); nav.toast(`${cur.number} deleted`); reload(); } catch (e: any) { nav.toast(e.message, true); }
+  };
+  const owner = isOwner(nav);
+  useKeyBar([
+    { key: 'Alt+F2', label: 'Period', run: () => (document.querySelector('[aria-label="From date"]') as HTMLInputElement)?.focus() },
+    { key: 'Alt+2', label: 'Duplicate', run: () => act('dup'), disabled: !cur },
+    ...(owner ? [{ key: 'Alt+X', label: 'Cancel voucher', run: () => act('cancel'), disabled: !cur || !!cur?.cancelled }, { key: 'Alt+D', label: 'Delete', run: () => act('delete'), disabled: !cur }] : []),
+  ], [cur, owner, range]);
   const total = rows.filter((r) => !r.cancelled).reduce((a, r) => a + r.total, 0);
   return (
     <div className="report">
@@ -252,7 +274,8 @@ export function LedgerReport({ id, active }: { id: number; active: boolean }) {
     await openWhatsApp(m.phone, m.text);
   };
   useKeyBar([
-    { key: 'Alt+W', label: 'WhatsApp reminder', run: remind, disabled: !d?.ledger || d.closing <= 0 },
+    { key: 'Ctrl+Alt+W', label: 'WhatsApp reminder', run: remind, disabled: !d?.ledger || d.closing <= 0 },
+    { key: 'Alt+W', label: 'WhatsApp reminder', run: remind, disabled: !d?.ledger || d.closing <= 0, hidden: true },
     { key: 'Ctrl+Enter', label: 'Alter ledger', run: () => nav.push({ name: 'ledger-form', props: { id } }) },
   ], [d]);
   if (!d) return null;
@@ -349,7 +372,10 @@ export function Outstanding({ kind, active }: { kind: 'receivable' | 'payable'; 
     await openWhatsApp(m.phone, m.text);
     if (!m.phone) nav.toast(`No mobile number saved for ${m.partyName}`, true);
   };
-  useKeyBar(kind === 'receivable' ? [{ key: 'Alt+W', label: 'WhatsApp reminder', run: () => shown[sel] && remind(shown[sel].ledger_id) }] : [], [shown, sel]);
+  useKeyBar(kind === 'receivable' ? [
+    { key: 'Ctrl+Alt+W', label: 'WhatsApp reminder', run: () => shown[sel] && remind(shown[sel].ledger_id) },
+    { key: 'Alt+W', label: 'WhatsApp reminder', run: () => shown[sel] && remind(shown[sel].ledger_id), hidden: true },
+  ] : [], [shown, sel]);
   const total = shown.reduce((a, r) => a + r.pending, 0);
   return (
     <div className="report">

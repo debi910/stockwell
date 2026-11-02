@@ -16,17 +16,29 @@ const fail = (msg: string): never => {
 
 export type VoucherType =
   | 'sales' | 'purchase' | 'credit_note' | 'debit_note'
-  | 'receipt' | 'payment' | 'contra' | 'journal';
+  | 'receipt' | 'payment' | 'contra' | 'journal'
+  | 'sales_order' | 'purchase_order' | 'rejection_in' | 'rejection_out' | 'stock_journal' | 'physical_stock';
 
-export const VOUCHER_TYPES: Record<VoucherType, { label: string; prefix: string; inventory: boolean }> = {
-  sales: { label: 'Sales', prefix: 'S', inventory: true },
-  purchase: { label: 'Purchase', prefix: 'P', inventory: true },
-  credit_note: { label: 'Credit Note', prefix: 'CN', inventory: true },
-  debit_note: { label: 'Debit Note', prefix: 'DN', inventory: true },
-  receipt: { label: 'Receipt', prefix: 'R', inventory: false },
-  payment: { label: 'Payment', prefix: 'PY', inventory: false },
-  contra: { label: 'Contra', prefix: 'C', inventory: false },
-  journal: { label: 'Journal', prefix: 'J', inventory: false },
+/** TallyPrime's voucher types and their keys (help.tallysolutions.com/keyboard-shortcuts-tally-prime).
+ *  inventory: party + item lines. stock: item lines only. books: posts to ledgers. move: stock direction. */
+export const VOUCHER_TYPES: Record<VoucherType, { label: string; prefix: string; inventory: boolean; stock?: boolean; books: boolean; move: -1 | 0 | 1 }> = {
+  sales: { label: 'Sales', prefix: 'S', inventory: true, books: true, move: -1 },
+  purchase: { label: 'Purchase', prefix: 'P', inventory: true, books: true, move: 1 },
+  credit_note: { label: 'Credit Note', prefix: 'CN', inventory: true, books: true, move: 1 },
+  debit_note: { label: 'Debit Note', prefix: 'DN', inventory: true, books: true, move: -1 },
+  receipt: { label: 'Receipt', prefix: 'R', inventory: false, books: true, move: 0 },
+  payment: { label: 'Payment', prefix: 'PY', inventory: false, books: true, move: 0 },
+  contra: { label: 'Contra', prefix: 'C', inventory: false, books: true, move: 0 },
+  journal: { label: 'Journal', prefix: 'J', inventory: false, books: true, move: 0 },
+  // Orders: a record of what was ordered; no stock or ledger effect until the bill is made.
+  sales_order: { label: 'Sales Order', prefix: 'SO', inventory: true, books: false, move: 0 },
+  purchase_order: { label: 'Purchase Order', prefix: 'PO', inventory: true, books: false, move: 0 },
+  // Rejections: goods coming back or going back with no money effect yet (a credit or debit note settles it later).
+  rejection_in: { label: 'Rejection In', prefix: 'RI', inventory: true, books: false, move: 1 },
+  rejection_out: { label: 'Rejection Out', prefix: 'RO', inventory: true, books: false, move: -1 },
+  // Stock only: moving, writing off (damage, expiry) or counting stock.
+  stock_journal: { label: 'Stock Journal', prefix: 'SJ', inventory: false, stock: true, books: false, move: 0 },
+  physical_stock: { label: 'Physical Stock', prefix: 'PS', inventory: false, stock: true, books: false, move: 0 },
 };
 
 export interface Company {
@@ -445,11 +457,114 @@ export class Books {
       if (dep.found.length) {
         fail(`${v.number} cannot be cancelled: ${[...new Set(dep.found.map((d) => d.number))].join(', ')} ${dep.found.length > 1 ? 'are' : 'is'} set against it. Alter or cancel ${dep.found.length > 1 ? 'those' : 'that'} first.`);
       }
+      this.checkStockWithout(v);
       this.db.prepare(`UPDATE vouchers SET cancelled=1, updated_at=datetime('now') WHERE id=?`).run(id);
       this.db.prepare(`DELETE FROM bills WHERE voucher_id=?`).run(id);
       this.audit('voucher', id, 'cancel', v);
       return this.voucher(id);
     })();
+  }
+
+  /** Deletes a voucher for good (Tally's Alt+D). The edit log keeps a full copy, and GSTR-1 Table 13
+   *  still counts the missing number. A cancel (Alt+X) is usually better for sales bills. */
+  deleteVoucher(id: number) {
+    return this.db.transaction(() => {
+      const v = this.voucher(id);
+      const dep = this.dependants(v);
+      if (dep.found.length) {
+        fail(`${v.number} cannot be deleted: ${[...new Set(dep.found.map((d) => d.number))].join(', ')} ${dep.found.length > 1 ? 'are' : 'is'} set against it. Alter or delete ${dep.found.length > 1 ? 'those' : 'that'} first.`);
+      }
+      if (!v.cancelled) this.checkStockWithout(v);
+      if ((v as unknown as { ewb_no?: string }).ewb_no && !v.cancelled) fail(`${v.number} has an e-Way Bill (${(v as unknown as { ewb_no?: string }).ewb_no}). Cancel the e-Way Bill on the portal and then cancel this voucher (Alt+X) instead.`);
+      this.audit('voucher', id, 'delete', v);
+      for (const t of ['entries', 'inventory', 'bills']) this.db.prepare(`DELETE FROM ${t} WHERE voucher_id=?`).run(id);
+      this.db.prepare(`DELETE FROM vouchers WHERE id=?`).run(id);
+      // A batch that only this voucher brought in goes too.
+      this.db.prepare(`DELETE FROM batches WHERE opening_qty=0 AND NOT EXISTS (SELECT 1 FROM inventory iv WHERE iv.batch_id=batches.id)`).run();
+      return { ok: true, number: v.number };
+    })();
+  }
+
+  /** Taking out a purchase (or other stock coming in) must not leave later bills selling stock that is not there. */
+  private checkStockWithout(v: { id: number; number: string }) {
+    if (this.company().allow_negative_stock) return;
+    const inward = this.db.prepare(`SELECT DISTINCT item_id, batch_id FROM inventory WHERE voucher_id=? AND direction=1`).all(v.id) as { item_id: number; batch_id: number | null }[];
+    for (const l of inward) {
+      if (this.stockOf(l.item_id, '9999-12-31', v.id) < 0) fail(`Without ${v.number}, the stock of ${this.item(l.item_id).name} would go below zero, because later bills sold it. Alter those bills first.`);
+      if (l.batch_id) {
+        const b = this.batches(l.item_id, '9999-12-31', v.id).find((x) => x.id === l.batch_id);
+        if (b && b.qty < 0) fail(`Without ${v.number}, batch ${b.batch_no} of ${this.item(l.item_id).name} would go below zero, because later bills sold from it.`);
+      }
+    }
+  }
+
+  /** Stock Journal and Physical Stock lines. Stock Journal: each line goes 'in' or 'out' (damage written off,
+   *  stock moved or repacked). Physical Stock: each line is the counted quantity, and the difference is posted. */
+  private stockLines(type: VoucherType, input: VoucherInput, excludeId: number, out: Record<string, unknown>[], allowNegative: number) {
+    const lines = Array.isArray(input.lines) ? input.lines : [];
+    if (!lines.length) fail('Add at least one item.');
+    if (lines.length > 500) fail('A voucher can have at most 500 item lines.');
+    const take = new Map<number, number>();
+    let total = 0;
+    const push = (item: Item, batchId: number | null, qty: number, rate: number, direction: 1 | -1) => {
+      const value = Math.round(qty * rate);
+      out.push({ line_no: out.length + 1, item_id: item.id, batch_id: batchId, qty, free_qty: 0, rate, discount_pct: 0, gst_rate: 0, taxable: value, cgst: 0, sgst: 0, igst: 0, direction });
+      if (direction < 0) take.set(item.id, (take.get(item.id) ?? 0) + qty);
+      total += value;
+    };
+    for (const l of lines as (InventoryLineInput & { direction?: string })[]) {
+      if (!l || typeof l !== 'object') fail('An item line is empty.');
+      const item = this.item(num(l.itemId, 'item'));
+      const qty = num(l.qty, 'quantity');
+      if (qty < 0 || qty > 1e7) fail(`Enter a quantity for ${item.name}.`);
+      const rate = l.rate === undefined || l.rate === null ? (item.purchase_rate || (item.opening_qty ? Math.round(item.opening_value / item.opening_qty) : 0)) : num(l.rate, 'rate');
+      if (!(rate >= 0) || rate > 1e11) fail(`Enter a rate for ${item.name}.`);
+      if (type === 'physical_stock' && l.direction === undefined) {
+        // Counted stock: post the difference from what the books say.
+        let batchId: number | null = null;
+        let booked: number;
+        if (item.track_batch && (l.batchId || l.batchNo)) {
+          batchId = l.batchId ? this.ownBatch(item.id, l.batchId) : this.ensureBatch(item.id, l);
+          booked = this.batches(item.id, input.date, excludeId).find((b) => b.id === batchId)?.qty ?? 0;
+        } else {
+          if (item.track_batch) fail(`Choose the batch you counted for ${item.name}.`);
+          booked = this.stockOf(item.id, input.date, excludeId);
+        }
+        const diff = Math.round((qty - booked) * 1000) / 1000;
+        if (diff) push(item, batchId, Math.abs(diff), rate, diff > 0 ? 1 : -1);
+        continue;
+      }
+      if (!(qty > 0)) fail(`Enter a quantity for ${item.name}.`);
+      const dir = l.direction === 'in' ? 1 : l.direction === 'out' ? -1 : fail(`Say whether ${item.name} goes in or out.`);
+      if (!item.track_batch) { push(item, null, qty, rate, dir); continue; }
+      if (dir > 0) {
+        const bid = l.batchId ? this.ownBatch(item.id, l.batchId) : this.ensureBatch(item.id, l);
+        if (!bid) fail(`Enter a batch number for ${item.name}.`);
+        push(item, bid, qty, rate, 1);
+      } else if (l.batchId) {
+        push(item, this.ownBatch(item.id, l.batchId), qty, rate, -1);
+      } else {
+        // Damaged or expired stock may come from expired batches too, so take the soonest-expiring first.
+        let left = qty;
+        for (const b of this.batches(item.id, input.date, excludeId)) {
+          if (left <= 0) break;
+          const q = Math.min(left, b.qty);
+          if (q > 0) { push(item, b.id, q, rate, -1); left -= q; }
+        }
+        if (left > 1e-9) {
+          if (!allowNegative) fail(`Not enough stock of ${item.name} in its batches.`);
+          push(item, null, left, rate, -1);
+        }
+      }
+    }
+    if (!out.length) fail('The counted stock matches the books, so there is nothing to post.');
+    if (!allowNegative) {
+      for (const [itemId, need] of take) {
+        const have = this.stockOf(itemId, input.date, excludeId);
+        if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}: ${have} in stock on ${input.date}, this voucher takes out ${need}.`);
+      }
+    }
+    return { total, party_id: null, account_id: null };
   }
 
   /** Stock of an item on a date, leaving out one voucher (the one being altered). */
@@ -502,15 +617,20 @@ export class Books {
       return row;
     };
 
-    if (VOUCHER_TYPES[type].inventory) {
+    const vt = VOUCHER_TYPES[type];
+    if (vt.stock) {
+      header = { ...header, ...this.stockLines(type, input, excludeId, invLines, company.allow_negative_stock) };
+    } else if (vt.inventory) {
       const party = this.ledger(num(input.partyId, 'party') || fail('Choose the party (customer or supplier).'));
-      const account = this.ledger(input.accountId ?? (type === 'sales' || type === 'credit_note' ? this.ledgerByName('Sales')?.id : this.ledgerByName('Purchase')?.id) ?? fail('Choose the sales or purchase ledger.'));
+      const account = vt.books
+        ? this.ledger(input.accountId ?? (type === 'sales' || type === 'credit_note' ? this.ledgerByName('Sales')?.id : this.ledgerByName('Purchase')?.id) ?? fail('Choose the sales or purchase ledger.'))
+        : null;
       const lines = Array.isArray(input.lines) ? input.lines : [];
       if (!lines.length) fail('Add at least one item.');
       if (lines.length > 500) fail('A voucher can have at most 500 item lines.');
       const pos = party.state_code || company.state_code;
       const intra = isIntraState(company.state_code, pos);
-      const outward = type === 'sales' || type === 'debit_note';
+      const outward = type === 'sales' || type === 'debit_note' || type === 'sales_order' || type === 'rejection_out';
       const registered = isValidGstin(party.gstin || '');
       snapshot = { gstin: registered ? party.gstin : '', state: pos };
 
@@ -543,7 +663,7 @@ export class Books {
         if (gstRate < 0 || gstRate > 40) fail(`GST rate for ${item.name} must be between 0 and 40%.`);
         if (item.taxability !== 'taxable') gstRate = 0;
         // An unregistered supplier cannot charge GST, so there is no tax (and no input credit) on the purchase.
-        if ((type === 'purchase' || type === 'debit_note') && !registered) gstRate = 0;
+        if ((type === 'purchase' || type === 'debit_note' || type === 'purchase_order' || type === 'rejection_in') && !registered) gstRate = 0;
         if ((type === 'sales' || type === 'credit_note') && gstRate > 0 && !HSN_RE.test(item.hsn || '')) {
           fail(`Add a 4, 6 or 8 digit HSN code to "${item.name}" first (Alter → Stock Item). GSTR-1 needs it.`);
         }
@@ -552,12 +672,12 @@ export class Books {
         const base = { item, qty, free, rate: exactRate, disc, gstRate };
         needByItem.set(item.id, (needByItem.get(item.id) ?? 0) + qty + free);
 
-        if (!item.track_batch) {
+        if (!item.track_batch || vt.move === 0) {
           if (l.batchId) this.ownBatch(item.id, l.batchId);
           prepared.push({ ...base, batchId: null });
           continue;
         }
-        if (type === 'purchase' || type === 'credit_note') {
+        if (vt.move > 0) {
           const bid = l.batchId ? this.ownBatch(item.id, l.batchId) : this.ensureBatch(item.id, l);
           if (!bid) fail(`Enter a batch number for ${item.name}.`);
           prepared.push({ ...base, batchId: bid });
@@ -569,7 +689,7 @@ export class Books {
         for (const part of this.allocateBatches(item, qty, free, input.date, excludeId)) prepared.push({ ...base, ...part });
       }
 
-      if (outward && !company.allow_negative_stock) {
+      if (vt.move < 0 && !company.allow_negative_stock) {
         for (const [itemId, need] of needByItem) {
           const have = this.stockOf(itemId, input.date, excludeId);
           if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}: ${have} in stock on ${input.date}, this voucher needs ${need}.`);
@@ -577,7 +697,7 @@ export class Books {
       }
 
       const totals = computeInvoice(prepared.map((p) => ({ qty: p.qty, rate: p.rate, discountPct: p.disc, gstRate: p.gstRate })), intra);
-      const direction = outward ? -1 : 1;
+      const direction = vt.move;
       prepared.forEach((p, i) => {
         const t = totals.lines[i];
         invLines.push({
@@ -587,19 +707,21 @@ export class Books {
       });
       // Sales and debit notes debit the party; purchases and credit notes credit it.
       const partySign = outward ? 1 : -1;
+      if (account) {
       entries.push({ ledgerId: party.id, amount: partySign * totals.total });
       entries.push({ ledgerId: account.id, amount: -partySign * totals.taxable });
       if (totals.cgst) entries.push({ ledgerId: this.taxLedger('cgst').id, amount: -partySign * totals.cgst });
       if (totals.sgst) entries.push({ ledgerId: this.taxLedger('sgst').id, amount: -partySign * totals.sgst });
       if (totals.igst) entries.push({ ledgerId: this.taxLedger('igst').id, amount: -partySign * totals.igst });
       if (totals.roundOff) entries.push({ ledgerId: this.taxLedger('roundoff').id, amount: -partySign * totals.roundOff });
+      }
       header = {
         taxable: totals.taxable, cgst: totals.cgst, sgst: totals.sgst, igst: totals.igst, round_off: totals.roundOff,
         total: totals.total, intra: intra ? 1 : 0, place_of_supply: pos,
       };
       header.party_id = party.id;
-      header.account_id = account.id;
-      if (this.isBillWise(party.id)) {
+      header.account_id = account?.id ?? null;
+      if (account && this.isBillWise(party.id)) {
         if (type === 'sales' || type === 'purchase') {
           let ref = numbering.number;
           if (type === 'purchase' && input.refNo?.trim()) {
@@ -686,7 +808,7 @@ export class Books {
     for (const e of entries) if (!Number.isSafeInteger(e.amount)) fail('An amount is too large.');
     const net = entries.reduce((a, e) => a + e.amount, 0);
     if (net !== 0) fail(`Debit and credit do not match (difference ${(net / 100).toFixed(2)}).`);
-    if (header.total === 0) fail('The voucher total is zero.');
+    if (header.total === 0 && !vt.stock) fail('The voucher total is zero.');
 
     if (existing) {
       // Bills that other vouchers settle must keep their party and reference.

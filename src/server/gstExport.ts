@@ -149,7 +149,13 @@ export function gstr1(books: Books, period: string) {
     return [...groups.values()].map((list, i) => {
       const sorted = [...list].sort((a, b) => series(a.number).n - series(b.number).n);
       const cancelled = list.filter((v) => v.cancelled).length;
-      return { num: i + 1, from: sorted[0].number, to: sorted[sorted.length - 1].number, totnum: list.length, cancel: cancelled, net_issue: list.length - cancelled };
+      // Numbers missing inside the range (deleted vouchers) count as cancelled, as the portal expects.
+      const first = series(sorted[0].number).n;
+      const last = series(sorted[sorted.length - 1].number).n;
+      const span = Number.isFinite(first) && Number.isFinite(last) && last >= first ? last - first + 1 : list.length;
+      const totnum = Math.max(span, list.length);
+      const net = list.length - cancelled;
+      return { num: i + 1, from: sorted[0].number, to: sorted[sorted.length - 1].number, totnum, cancel: totnum - net, net_issue: net };
     });
   };
   const docDet = [

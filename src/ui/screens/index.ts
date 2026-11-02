@@ -2,7 +2,13 @@ import type { ComponentType } from 'react';
 import type { Screen } from '../nav';
 import { AlterMenu, CreateMenu, Gateway, ReportsMenu } from './Gateway';
 import { GroupForm, ItemForm, LedgerForm, MasterList, StockGroupForm, UnitForm } from './Masters';
-import { VoucherForm } from './Voucher';
+import { STOCK_TYPES, VoucherForm } from './Voucher';
+import { StockVoucherForm } from './StockVoucher';
+import { GoTo, VoucherTypesMenu } from './GoTo';
+import { createElement } from 'react';
+
+/** Stock Journal and Physical Stock have their own layout; every other type uses the invoice or accounting layout. */
+const VoucherScreen = (p: any) => createElement(STOCK_TYPES.includes(p.type) ? StockVoucherForm : VoucherForm, p);
 import { Alerts, AuditLog, BalanceSheet, DayBook, GroupSummary, LedgerReport, Outstanding, ProfitLoss, StockSummary, TrialBalance } from './Reports';
 import { BackupScreen, CompanySettings, GstScreen, ImportTally, UsersScreen } from './Settings';
 import { VOUCHER_LABEL } from '../format';
@@ -18,7 +24,9 @@ export const SCREENS: Record<string, ComponentType<any>> = {
   'stock-group-form': StockGroupForm,
   'unit-form': UnitForm,
   'master-list': MasterList,
-  voucher: VoucherForm,
+  voucher: VoucherScreen,
+  'voucher-types': VoucherTypesMenu,
+  goto: GoTo,
   'day-book': DayBook,
   'trial-balance': TrialBalance,
   'group-summary': GroupSummary,
@@ -43,6 +51,7 @@ const TITLES: Record<string, string> = {
   'profit-loss': 'Profit & Loss A/c', 'balance-sheet': 'Balance Sheet', 'ledger-report': 'Ledger Vouchers', 'stock-summary': 'Stock Summary',
   outstanding: 'Outstandings', alerts: 'Alerts & Reminders', audit: 'Edit Log', gst: 'GST Returns', company: 'Company',
   users: 'Users and Passwords', 'import-tally': 'Import from Tally', backup: 'Backup',
+  'voucher-types': 'Change Voucher Type', goto: 'Go To',
 };
 
 export function screenTitle(s: Screen): string {

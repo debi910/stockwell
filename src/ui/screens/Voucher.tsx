@@ -6,8 +6,20 @@ import { confirmBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle, keyName } from '../nav';
 import { VOUCHER_LABEL, computeInvoice, drCr, focusNext, formatINR, isIntraState, parseDate, rupeesText, schemeFreeQty, shortDate, toPaise } from '../format';
 
-const INVENTORY = ['sales', 'purchase', 'credit_note', 'debit_note'];
-const TYPE_KEYS: Record<string, string> = { F4: 'contra', F5: 'payment', F6: 'receipt', F7: 'journal', F8: 'sales', F9: 'purchase', 'Ctrl+F8': 'credit_note', 'Ctrl+F9': 'debit_note' };
+const INVENTORY = ['sales', 'purchase', 'credit_note', 'debit_note', 'sales_order', 'purchase_order', 'rejection_in', 'rejection_out'];
+/** Types that post to ledgers (orders and rejections only move stock or nothing). */
+const BOOKS = ['sales', 'purchase', 'credit_note', 'debit_note'];
+/** Types priced at the selling rate. */
+const SELL = ['sales', 'credit_note', 'sales_order', 'rejection_in'];
+/** Types that bring stock in, so a new batch can be typed. */
+const STOCK_IN = ['purchase', 'credit_note', 'rejection_in'];
+/** TallyPrime's voucher keys (help.tallysolutions.com/keyboard-shortcuts-tally-prime). */
+export const TYPE_KEYS: Record<string, string> = {
+  F4: 'contra', F5: 'payment', F6: 'receipt', F7: 'journal', F8: 'sales', F9: 'purchase',
+  'Alt+F6': 'credit_note', 'Alt+F5': 'debit_note', 'Ctrl+F8': 'sales_order', 'Ctrl+F9': 'purchase_order',
+  'Ctrl+F6': 'rejection_in', 'Ctrl+F5': 'rejection_out', 'Alt+F7': 'stock_journal', 'Ctrl+F7': 'physical_stock',
+};
+export const STOCK_TYPES = ['stock_journal', 'physical_stock'];
 
 interface ItemLine { key: number; itemId: number | null; batchId: number | null; batchNo: string; expiry: string; qty: string; free: string; freeTouched: boolean; rate: string; disc: string }
 interface AccLine { key: number; ledgerId: number | null; amount: string; side: 'Dr' | 'Cr'; bills: { ref: string; amount: number }[] | null }
@@ -44,7 +56,7 @@ export async function sendBillOnWhatsApp(id: number, toast: (m: string, e?: bool
   await openWhatsApp(msg.phone, msg.text);
 }
 
-export function VoucherForm({ type: initialType, id, active }: { type: string; id?: number; active: boolean }) {
+export function VoucherForm({ type: initialType, id, copyFrom, active }: { type: string; id?: number; copyFrom?: number; active: boolean }) {
   const nav = useNav();
   const [type, setType] = useState(initialType);
   const inventory = INVENTORY.includes(type);
@@ -69,7 +81,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   const [pending, setPending] = useState<Record<number, any[]>>({});
   const [last, setLast] = useState<any>(null);
   const [billEdit, setBillEdit] = useState<number | null>(null);
-  const [loaded, setLoaded] = useState(!id);
+  const [loaded, setLoaded] = useState(!id && !copyFrom);
   const narrationRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLDivElement>(null);
   const label = VOUCHER_LABEL[type];
@@ -91,6 +103,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   // Defaults: the Sales/Purchase ledger for invoices, Cash for receipts and payments.
   useEffect(() => {
     if (id || !ledgers.length) return;
+    if (inventory && !BOOKS.includes(type)) return;
     if (inventory) {
       const name = type === 'sales' || type === 'credit_note' ? 'Sales' : 'Purchase';
       setAccountId((a) => a ?? ledgers.find((l) => l.name === name)?.id ?? null);
@@ -99,26 +112,25 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     }
   }, [ledgers, type, inventory, id]);
 
-  // Load an existing voucher for alteration.
+  // Load an existing voucher for alteration, or as the start of a new one (Alt+2 Duplicate).
   useEffect(() => {
-    if (!id) return;
-    api.get(`/api/vouchers/${id}`).then((v) => {
+    const src = id ?? copyFrom;
+    if (!src) return;
+    const copy = !id;
+    api.get(`/api/vouchers/${src}`).then((v) => {
       setType(v.type);
-      setNumber(v.number);
-      setDateText(shortDate(v.date));
+      if (!copy) { setNumber(v.number); setDateText(shortDate(v.date)); setRefNo(v.ref_no ?? ''); setVehicle(v.vehicle_no ?? ''); }
       setNarration(v.narration ?? '');
-      setRefNo(v.ref_no ?? '');
-      setVehicle(v.vehicle_no ?? '');
-      setDistance(v.distance_km ? String(v.distance_km) : '');
+      if (!copy) setDistance(v.distance_km ? String(v.distance_km) : '');
       if (INVENTORY.includes(v.type)) {
         setPartyId(v.party_id);
         setAccountId(v.account_id);
         setLines([...v.lines.map((l: any) => ({
-          key: keySeq++, itemId: l.item_id, batchId: l.batch_id, batchNo: l.batch_no ?? '', expiry: l.expiry_date ?? '',
+          key: keySeq++, itemId: l.item_id, batchId: copy && v.type === 'sales' ? null : l.batch_id, batchNo: copy && v.type === 'sales' ? '' : l.batch_no ?? '', expiry: copy && v.type === 'sales' ? '' : l.expiry_date ?? '',
           qty: String(l.qty), free: l.free_qty ? String(l.free_qty) : '', freeTouched: true, rate: rupeesText(l.rate), disc: l.discount_pct ? String(l.discount_pct) : '',
         })), blankItem()]);
         const agst = v.bills.find((b: any) => b.kind === 'agst');
-        if (agst) setAgainstRef(agst.ref);
+        if (agst && !copy) setAgainstRef(agst.ref);
       } else if (v.type === 'journal') {
         setAcc([...v.entries.map((e: any) => ({ key: keySeq++, ledgerId: e.ledger_id, amount: rupeesText(Math.abs(e.amount)), side: e.amount > 0 ? 'Dr' : 'Cr', bills: null })), blankAcc('Dr')]);
       } else {
@@ -126,13 +138,13 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
         const others = v.entries.filter((e: any) => e.ledger_id !== v.account_id);
         setAcc([...others.map((e: any) => ({
           key: keySeq++, ledgerId: e.ledger_id, amount: rupeesText(Math.abs(e.amount)), side: 'Cr',
-          bills: v.bills.filter((b: any) => b.ledger_id === e.ledger_id && b.kind === 'agst').map((b: any) => ({ ref: b.ref, amount: Math.abs(b.amount) })),
+          bills: copy ? null : v.bills.filter((b: any) => b.ledger_id === e.ledger_id && b.kind === 'agst').map((b: any) => ({ ref: b.ref, amount: Math.abs(b.amount) })),
         })), blankAcc()]);
       }
       setLoaded(true);
     }).catch((e) => nav.toast(e.message, true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, copyFrom]);
 
   const company = nav.company;
   const party = ledgers.find((l) => l.id === partyId);
@@ -163,7 +175,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
 
   const pickItem = (key: number, itemId: number) => {
     const it = itemById(itemId);
-    const sell = type === 'sales' || type === 'credit_note';
+    const sell = SELL.includes(type);
     setLine(key, { itemId, rate: rupeesText(sell ? it?.sale_rate : it?.purchase_rate), batchId: null, batchNo: '', freeTouched: false });
     if (it?.track_batch) loadBatches(itemId);
   };
@@ -230,7 +242,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     if (!id) body.clientKey = clientKey.current;
     if (inventory) {
       Object.assign(body, {
-        partyId, accountId, refNo, againstRef: againstRef || undefined, vehicleNo: vehicle, distanceKm: Number(distance) || 0,
+        partyId, accountId: BOOKS.includes(type) ? accountId : undefined, refNo, againstRef: againstRef || undefined, vehicleNo: vehicle, distanceKm: Number(distance) || 0,
         lines: filledLines.map((l) => ({
           itemId: l.itemId, batchId: l.batchId || undefined, batchNo: l.batchNo || undefined, expiryDate: l.expiry || undefined,
           qty: Number(l.qty), freeQty: Number(l.free) || 0, rate: toPaise(l.rate || 0), discountPct: Number(l.disc) || 0,
@@ -264,6 +276,15 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     try { await api.post(`/api/vouchers/${id}/cancel`); nav.toast(`${number} cancelled`); nav.pop(); } catch (e: any) { nav.toast(e.message, true); }
   };
 
+  const deleteVoucher = async () => {
+    if (!id) return;
+    const msg = type === 'sales'
+      ? `Delete ${label} ${number}?\nFor sales bills, Cancel (Alt+X) is usually better: GST wants every bill number accounted for. A deleted number shows as cancelled in GSTR-1.`
+      : `Delete ${label} ${number}? This cannot be undone. A copy stays in the edit log.`;
+    if (!(await confirmBox(msg, { yes: 'Delete', no: 'Keep', danger: true }))) return;
+    try { await api.del(`/api/vouchers/${id}`); nav.toast(`${number} deleted`); nav.pop(); } catch (e: any) { nav.toast(e.message, true); }
+  };
+
   const print = async (vid: number, no: string) => { try { await printVoucher(vid, `${no.replace(/[\\/:*?"<>|]/g, '-')}.pdf`, nav.toast); } catch (e: any) { nav.toast(e.message, true); } };
   const whatsapp = async (vid: number) => { try { await sendBillOnWhatsApp(vid, nav.toast); } catch (e: any) { nav.toast(e.message, true); } };
 
@@ -279,22 +300,35 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
     }
     if (TYPE_KEYS[k] && !id) {
       const t = TYPE_KEYS[k];
+      if (STOCK_TYPES.includes(t)) { nav.replace({ name: 'voucher', props: { type: t } }); return true; }
       if (t !== type) { setType(t); setAccountId(null); setLines([blankItem()]); setAcc([blankAcc(t === 'journal' ? 'Dr' : 'Cr')]); setPartyId(null); }
       return true;
     }
+    if (k === 'Ctrl+D') {
+      // Tally's Ctrl+D: remove the item or ledger line the cursor is on.
+      const row = (document.activeElement as HTMLElement | null)?.closest('tr[data-line]') as HTMLElement | null;
+      const key = Number(row?.dataset.line);
+      if (!key) return true;
+      if (inventory) setLines((ls) => { const next = ls.filter((x) => x.key !== key); return next.length ? next : [blankItem()]; });
+      else setAcc((ls) => { const next = ls.filter((x) => x.key !== key); return next.length ? next : [blankAcc(type === 'journal' ? 'Dr' : 'Cr')]; });
+      return true;
+    }
     if (k === 'Alt+X' && id) { cancelVoucher(); return true; }
+    if (k === 'Alt+D' && id) { deleteVoucher(); return true; }
+    if (k === 'Alt+2' && (id ?? last?.id)) { nav.push({ name: 'voucher', props: { type, copyFrom: id ?? last.id } }); return true; }
     const target = id ?? last?.id;
     const targetNo = id ? number : last?.number;
-    if (k === 'Alt+P' && target && inventory) { print(target, targetNo); return true; }
-    if (k === 'Alt+W' && target && (id ? type === 'sales' : last?.type === 'sales')) { whatsapp(target); return true; }
+    if ((k === 'Ctrl+P' || k === 'Alt+P') && target && inventory) { print(target, targetNo); return true; }
+    if ((k === 'Ctrl+Alt+W' || k === 'Alt+W') && target && (id ? type === 'sales' : last?.type === 'sales')) { whatsapp(target); return true; }
     return false;
   });
   const target = id ?? last?.id;
   useKeyBar([
     { key: 'Ctrl+A', label: 'Accept', run: save },
-    { key: 'Alt+P', label: 'Print / PDF', run: () => target && print(target, id ? number : last.number), disabled: !target || !inventory },
-    { key: 'Alt+W', label: 'WhatsApp bill', run: () => target && whatsapp(target), disabled: !target || !(id ? type === 'sales' : last?.type === 'sales') },
-    ...(id ? [{ key: 'Alt+X', label: 'Cancel voucher', run: cancelVoucher }] : []),
+    { key: 'Ctrl+P', label: 'Print / PDF', run: () => target && print(target, id ? number : last.number), disabled: !target || !inventory },
+    { key: 'Ctrl+Alt+W', label: 'WhatsApp bill', run: () => target && whatsapp(target), disabled: !target || !(id ? type === 'sales' : last?.type === 'sales') },
+    { key: 'Alt+2', label: 'Duplicate', run: () => target && nav.push({ name: 'voucher', props: { type, copyFrom: target } }), disabled: !target },
+    ...(id ? [{ key: 'Alt+X', label: 'Cancel voucher', run: cancelVoucher }, { key: 'Alt+D', label: 'Delete', run: deleteVoucher }] : []),
   ], [save, target, inventory, type, id, number, last]);
 
   if (!loaded) return <div className="empty-state">Loading…</div>;
@@ -305,10 +339,10 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
   const allLedgerOptions = ledgers.map((l) => ({ id: l.id, label: l.name, meta: drCr(l.balance) || l.group_name }));
   const cashBank = ledgers.filter((l) => ['Cash-in-Hand', 'Bank Accounts', 'Bank OD A/c'].includes(l.group_name)).map((l) => ({ id: l.id, label: l.name, meta: drCr(l.balance) }));
   const accountOptions = ledgers.filter((l) => (type === 'sales' || type === 'credit_note' ? l.group_name === 'Sales Accounts' : l.group_name === 'Purchase Accounts')).map((l) => ({ id: l.id, label: l.name }));
-  const itemOptions = items.map((i) => ({ id: i.id, label: i.name, meta: `${i.stock} ${i.unit} · ₹${formatINR(type === 'purchase' ? i.purchase_rate : i.sale_rate)}` }));
+  const itemOptions = items.map((i) => ({ id: i.id, label: i.name, meta: `${i.stock} ${i.unit} · ₹${formatINR(SELL.includes(type) ? i.sale_rate : i.purchase_rate)}` }));
   const createParty = (typed: string) => nav.push({
     name: 'ledger-form',
-    props: { name: typed, groupHint: type === 'purchase' || type === 'debit_note' ? 'Sundry Creditors' : 'Sundry Debtors', onSaved: (l: any) => { reloadMasters(); setPartyId(l.id); } },
+    props: { name: typed, groupHint: SELL.includes(type) ? 'Sundry Debtors' : 'Sundry Creditors', onSaved: (l: any) => { reloadMasters(); setPartyId(l.id); } },
   });
   const createItem = (key: number) => (typed: string) => nav.push({ name: 'item-form', props: { name: typed, onSaved: async (it: any) => { await reloadMasters(); setLine(key, { itemId: it.id, rate: rupeesText(it.sale_rate) }); } } });
   const showEway = type === 'sales' && totals.total > company.ewb_threshold;
@@ -320,8 +354,8 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
         {last && !id && (
           <div className="subtle">
             Last saved: <b>{last.number}</b> ₹{formatINR(last.total)}{' '}
-            {INVENTORY.includes(last.type) && <button className="btn small" onClick={() => print(last.id, last.number)}>Print (Alt+P)</button>}{' '}
-            {last.type === 'sales' && <button className="btn small wa" onClick={() => whatsapp(last.id)}>WhatsApp (Alt+W)</button>}
+            {INVENTORY.includes(last.type) && <button className="btn small" onClick={() => print(last.id, last.number)}>Print (Ctrl+P)</button>}{' '}
+            {last.type === 'sales' && <button className="btn small wa" onClick={() => whatsapp(last.id)}>WhatsApp (Ctrl+Alt+W)</button>}
           </div>
         )}
         <div>Date <input className="f" style={{ width: 110, display: 'inline-block' }} aria-label="Date" value={dateText} onChange={(e) => setDateText(e.target.value)} onKeyDown={enterNext} onFocus={(e) => e.currentTarget.select()} />
@@ -335,9 +369,11 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
               <Combo name="Party" title="List of Ledger Accounts" value={partyId} options={partyOptions} autoFocus={!id}
                 onChange={(v) => setPartyId(v)} onCreate={createParty} />
             </div>
-            <div className="row"><label>{type === 'sales' || type === 'credit_note' ? 'Sales ledger' : 'Purchase ledger'}</label>
-              <Combo name="Account" title="Ledgers" value={accountId} options={accountOptions} onChange={setAccountId} />
-            </div>
+            {BOOKS.includes(type) && (
+              <div className="row"><label>{type === 'sales' || type === 'credit_note' ? 'Sales ledger' : 'Purchase ledger'}</label>
+                <Combo name="Account" title="Ledgers" value={accountId} options={accountOptions} onChange={setAccountId} />
+              </div>
+            )}
             {party && <div className="balance">Current balance: {drCr(party.balance) || 'Nil'} · {party.state_code ? `${nav.meta.states[party.state_code]} · ` : ''}{intra ? 'CGST + SGST' : 'IGST'}{party.gstin ? ` · ${party.gstin}` : ' · Unregistered'}</div>}
             {type === 'purchase' && <div className="row"><label>Supplier invoice no.</label><input className="f" aria-label="Supplier invoice" value={refNo} onChange={(e) => setRefNo(e.target.value)} onKeyDown={enterNext} /></div>}
             {(type === 'credit_note' || type === 'debit_note') && (
@@ -360,14 +396,14 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
                 const t = l.itemId && Number(l.qty) > 0 ? totals.lines[filledLines.findIndex((f) => f.key === l.key)] : null;
                 const bl = l.itemId ? batches[l.itemId] ?? [] : [];
                 return (
-                  <tr key={l.key}>
+                  <tr key={l.key} data-line={l.key}>
                     <td>
                       <Combo name={`Item ${idx + 1}`} title="List of Stock Items" value={l.itemId} options={itemOptions} onChange={(v) => pickItem(l.key, v)}
                         onCreate={createItem(l.key)} onEmptyEnter={() => (idx === lines.length - 1 ? narrationRef.current?.focus() : undefined)} />
                     </td>
                     <td>
-                      {it?.track_batch ? (
-                        type === 'purchase' || type === 'credit_note' ? (
+                      {it?.track_batch && !['sales_order', 'purchase_order'].includes(type) ? (
+                        STOCK_IN.includes(type) ? (
                           <div style={{ display: 'flex', gap: 4 }}>
                             <input className="f" aria-label={`Batch ${idx + 1}`} placeholder="Batch" value={l.batchNo} onChange={(e) => setLine(l.key, { batchNo: e.target.value })} onKeyDown={enterNext} />
                             <input className="f" aria-label={`Expiry ${idx + 1}`} placeholder="Expiry" title="Expiry date, e.g. 30-11-26" value={l.expiry ? shortDate(l.expiry) : ''} onChange={(e) => setLine(l.key, { expiry: parseDate(e.target.value) ?? '' })} onKeyDown={enterNext} />
@@ -440,7 +476,7 @@ export function VoucherForm({ type: initialType, id, active }: { type: string; i
                 const onAcc = amt - alloc.reduce((a, b) => a + b.amount, 0);
                 const options = type === 'contra' ? cashBank : allLedgerOptions;
                 return (
-                  <tr key={l.key}>
+                  <tr key={l.key} data-line={l.key}>
                     {type === 'journal' && <td>
                       <select className="f" aria-label={`Side ${idx + 1}`} value={l.side} onChange={(e) => setAccLine(l.key, { side: e.target.value as 'Dr' | 'Cr' })} onKeyDown={enterNext}><option>Dr</option><option>Cr</option></select>
                     </td>}

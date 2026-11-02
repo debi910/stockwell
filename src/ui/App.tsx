@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import { api, setToken, whenLoggedOut } from './api';
 import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName } from './nav';
-import { parseDate, shortDate, todayISO } from './format';
+import { VOUCHER_LABEL, parseDate, shortDate, todayISO } from './format';
+import { TYPE_KEYS } from './screens/Voucher';
 import { SCREENS, screenTitle } from './screens';
 import { LoginScreen } from './screens/Settings';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -44,6 +45,8 @@ export function App() {
 
 function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   const [stack, setStack] = useState<Screen[]>([{ name: 'gateway' }]);
+  const stackRef = useRef(stack);
+  stackRef.current = stack;
   const [company, setCompany] = useState<any>(null);
   const [meta, setMeta] = useState<any>(null);
   const [workDate, setWorkDate] = useState(todayISO());
@@ -89,9 +92,18 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     { key: 'F7', label: 'Journal', run: () => openVoucher('journal') },
     { key: 'F8', label: 'Sales', run: () => openVoucher('sales') },
     { key: 'F9', label: 'Purchase', run: () => openVoucher('purchase') },
-    { key: 'Ctrl+F8', label: 'Credit Note', run: () => openVoucher('credit_note') },
-    { key: 'Ctrl+F9', label: 'Debit Note', run: () => openVoucher('debit_note') },
-    ...(onLogout ? [{ key: 'Ctrl+Q', label: 'Log out', run: onLogout }] : []),
+    { key: 'F10', label: 'Other Vouchers', run: () => navRef.current.push({ name: 'voucher-types' }) },
+    // TallyPrime's other voucher keys work everywhere but are not listed, as in Tally's button bar.
+    ...Object.entries(TYPE_KEYS).filter(([k]) => !/^F\d$/.test(k)).map(([key, type]) => ({ key, label: VOUCHER_LABEL[type], run: () => openVoucher(type), hidden: true })),
+    { key: 'Alt+F8', label: 'Delivery Note', hidden: true, run: () => toast.info('Delivery Note is not in Stockwell yet. Make the Sales bill (F8) directly.') },
+    { key: 'Alt+F9', label: 'Receipt Note', hidden: true, run: () => toast.info('Receipt Note is not in Stockwell yet. Enter the Purchase (F9) directly.') },
+    { key: 'Alt+G', label: 'Go To', run: () => navRef.current.push({ name: 'goto' }) },
+    { key: 'Ctrl+G', label: 'Go To', hidden: true, run: () => navRef.current.push({ name: 'goto' }) },
+    // Ctrl+Q leaves a screen, and on the Gateway quits (logs out), as in TallyPrime.
+    { key: 'Ctrl+Q', label: onLogout ? 'Quit / Log out' : 'Quit screen', run: () => {
+      if (stackRef.current.length > 1) navRef.current.pop();
+      else if (onLogout) confirmBox('Log out of Stockwell?', { yes: 'Log out', no: 'Stay' }).then((y) => { if (y) onLogout(); });
+    } },
   ];
   const top = stack.length - 1;
   const localKeys = screenKeys[top] ?? [];
@@ -143,11 +155,11 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
           })}
         </main>
         <aside className="keybar" aria-label="Keys">
-          {globalKeys.map((k) => (
+          {globalKeys.filter((k) => !k.hidden).map((k) => (
             <button key={k.key} onClick={k.run}><span className="k">{k.key}</span>{k.label}</button>
           ))}
           {localKeys.length > 0 && <div className="sep" />}
-          {localKeys.map((k) => (
+          {localKeys.filter((k) => !k.hidden).map((k) => (
             <button key={k.key + k.label} onClick={k.run} disabled={k.disabled}><span className="k">{k.key}</span>{k.label}</button>
           ))}
           <div className="sep" />

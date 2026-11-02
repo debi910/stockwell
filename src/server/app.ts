@@ -113,6 +113,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.get('/api/vouchers/:id', async (req) => books.voucher(Number((req.params as Q).id)));
   app.post('/api/vouchers', async (req) => books.createVoucher(req.body as never));
   app.put('/api/vouchers/:id', async (req) => books.updateVoucher(Number((req.params as Q).id), req.body as never));
+  app.delete('/api/vouchers/:id', async (req) => books.deleteVoucher(Number((req.params as Q).id)));
   app.post('/api/vouchers/:id/cancel', async (req) => books.cancelVoucher(Number((req.params as Q).id)));
   app.put('/api/vouchers/:id/ewb', async (req) => {
     const id = Number((req.params as Q).id);
