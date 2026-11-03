@@ -421,14 +421,36 @@ export function pendingOrders(books: Books, kind: 'sales' | 'purchase') {
 
 /** TDS: what was booked to each ledger marked with a TDS section, and the TDS credited in those vouchers. */
 export function tdsRegister(books: Books, from: string, to: string) {
-  return books.db.prepare(`
+  const ledgers = books.db.prepare(`
     SELECT l.id, l.name, l.tds_section, l.tds_rate,
       COALESCE(SUM(CASE WHEN e.amount<0 THEN -e.amount END),0) AS credited,
-      COALESCE(SUM(CASE WHEN e.amount>0 THEN e.amount END),0) AS debited,
-      COALESCE((SELECT -SUM(e2.amount) FROM entries e2 JOIN ledgers t ON t.id=e2.ledger_id JOIN vouchers v2 ON v2.id=e2.voucher_id
-        WHERE t.tax_kind='tds' AND v2.cancelled=0 AND v2.optional=0 AND v2.date BETWEEN ? AND ?
-          AND e2.voucher_id IN (SELECT voucher_id FROM entries WHERE ledger_id=l.id)), 0) AS tds
+      COALESCE(SUM(CASE WHEN e.amount>0 THEN e.amount END),0) AS debited
     FROM ledgers l LEFT JOIN entries e ON e.ledger_id=l.id
       AND e.voucher_id IN (SELECT id FROM vouchers v WHERE ${LIVE} AND v.date BETWEEN ? AND ?)
-    WHERE l.tds_section<>'' GROUP BY l.id ORDER BY l.tds_section, l.name`).all(from, to, from, to);
+    WHERE l.tds_section<>'' GROUP BY l.id ORDER BY l.tds_section, l.name`).all(from, to) as { id: number; name: string; tds_section: string; tds_rate: number; credited: number; debited: number; tds?: number }[];
+  const tds = new Map<number, number>(ledgers.map((l) => [l.id, 0]));
+  const rateOf = new Map(ledgers.map((l) => [l.id, l.tds_rate]));
+  // Per voucher: the TDS deducted (TDS ledgers credited; a deposit to the government is a debit and is not a deduction)
+  // is shared among that voucher's TDS-section ledgers by the TDS each one should bear (amount × its rate).
+  const rows = books.db.prepare(`
+    SELECT e.voucher_id, e.ledger_id, e.amount, l.tax_kind, l.tds_section FROM entries e JOIN ledgers l ON l.id=e.ledger_id JOIN vouchers v ON v.id=e.voucher_id
+    WHERE ${LIVE} AND v.date BETWEEN ? AND ? AND e.voucher_id IN (
+      SELECT e2.voucher_id FROM entries e2 JOIN ledgers t ON t.id=e2.ledger_id WHERE t.tax_kind='tds')`).all(from, to) as { voucher_id: number; ledger_id: number; amount: number; tax_kind: string | null; tds_section: string }[];
+  const byVoucher = new Map<number, typeof rows>();
+  for (const r of rows) byVoucher.set(r.voucher_id, [...(byVoucher.get(r.voucher_id) ?? []), r]);
+  for (const list of byVoucher.values()) {
+    const deducted = list.filter((r) => r.tax_kind === 'tds' && r.amount < 0).reduce((a, r) => a - r.amount, 0);
+    if (!deducted) continue;
+    const parts = list.filter((r) => r.tax_kind !== 'tds' && r.tds_section && tds.has(r.ledger_id) && r.amount > 0)
+      .map((r) => ({ id: r.ledger_id, w: r.amount * ((rateOf.get(r.ledger_id) || 0) || 1) }));
+    const total = parts.reduce((a, p) => a + p.w, 0);
+    if (!total) continue;
+    let left = deducted;
+    parts.forEach((p, i) => {
+      const share = i === parts.length - 1 ? left : Math.round((deducted * p.w) / total);
+      left -= share;
+      tds.set(p.id, (tds.get(p.id) ?? 0) + share);
+    });
+  }
+  return ledgers.map((l) => ({ ...l, tds: tds.get(l.id) ?? 0 }));
 }

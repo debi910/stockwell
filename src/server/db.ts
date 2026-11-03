@@ -253,6 +253,10 @@ function migrate(db: DB) {
   add('inventory', 'godown_id', 'INTEGER DEFAULT NULL'); // NULL = Main Location
   add('inventory', 'alt_qty', 'REAL DEFAULT NULL'); // quantity as typed in the alternate unit
   add('inventory', 'base_taxable', 'INTEGER DEFAULT NULL'); // before freight/discount spread over the lines
+  // What the bill said at the time: a later change to the item master or batch must not rewrite filed returns or reprints.
+  add('inventory', 'mrp', 'INTEGER DEFAULT NULL');
+  add('inventory', 'hsn', 'TEXT DEFAULT NULL');
+  add('inventory', 'uqc', 'TEXT DEFAULT NULL');
   add('items', 'alt_unit_id', 'INTEGER DEFAULT NULL');
   add('items', 'alt_conv', 'REAL NOT NULL DEFAULT 0'); // base units in one alternate unit, e.g. 24 Pcs in a Case
   add('ledgers', 'credit_limit', 'INTEGER NOT NULL DEFAULT 0');
@@ -285,7 +289,7 @@ function migrate(db: DB) {
     CREATE INDEX IF NOT EXISTS vouchers_against ON vouchers(against_id);
     DROP VIEW IF EXISTS gst_lines;
     CREATE VIEW gst_lines AS
-      SELECT iv.voucher_id, iv.line_no, iv.item_id, i.hsn, i.name AS item_name, u.uqc, iv.qty, iv.free_qty, iv.gst_rate,
+      SELECT iv.voucher_id, iv.line_no, iv.item_id, COALESCE(iv.hsn, i.hsn) AS hsn, i.name AS item_name, COALESCE(iv.uqc, u.uqc) AS uqc, iv.qty, iv.free_qty, iv.gst_rate,
         iv.taxable, iv.cgst, iv.sgst, iv.igst, i.taxability
       FROM inventory iv JOIN items i ON i.id=iv.item_id JOIN units u ON u.id=i.unit_id
       UNION ALL

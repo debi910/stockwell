@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDb } from './db';
-import { Books, BooksError, VOUCHER_TYPES } from './books';
+import { Books, BooksError, VOUCHER_TYPES, isoDate } from './books';
 import * as R from './reports';
 import { gstr1, gstr3b, gstr2bMatch, ewayBillJson, ewayCandidates, periodRange } from './gstExport';
 import { billMessage, invoiceHtml, reminderMessage } from './invoice';
@@ -51,11 +51,26 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     if (e.code === 'SQLITE_FULL') { logError(opts.errorLog, 'disk', err); return reply.status(507).send({ error: 'The disk on the main PC is full. Nothing was saved. Free some space and try again.' }); }
     if (e.code?.startsWith?.('FST_ERR_CTP') || (e as { statusCode?: number }).statusCode === 400) return reply.status(400).send({ error: 'The request was not understood. Please try again.' });
     if (e.statusCode && e.statusCode < 500) return reply.status(e.statusCode).send({ error: e.message });
+    // A field of the wrong kind (a number where text belongs, a list that is not a list) is the sender's mistake, not a crash.
+    if (err instanceof TypeError || err instanceof RangeError || /datatype mismatch|parameter values|bind|SQLite3 can only bind/i.test(e.message ?? '')) {
+      logError(opts.errorLog, `bad input ${_req.method} ${_req.url.split('?')[0]}`, err);
+      return reply.status(400).send({ error: 'Some details were not in the right form (text, number or date). Check the entry and try again.' });
+    }
     logError(opts.errorLog, `server ${_req.method} ${_req.url.split('?')[0]}`, err);
     return reply.status(500).send({ error: `Something went wrong and nothing was saved. (${e.message || 'unknown error'})` });
   });
 
   app.addHook('onClose', async () => db.close());
+  // Dates and months in report links must be real ones: a typo gives a clear message, never a crash or a blank report.
+  app.addHook('preValidation', async (req) => {
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    for (const k of ['asOf', 'from', 'to', 'date']) if (q[k] !== undefined && q[k] !== '') isoDate(q[k], `The ${k === 'asOf' ? 'as-on' : k} date`);
+    for (const k of ['period', 'toPeriod']) {
+      if (q[k] !== undefined && q[k] !== '' && !/^\d{4}-(0[1-9]|1[0-2])$/.test(String(q[k]))) throw Object.assign(new BooksError(`The ${k === 'period' ? 'month' : 'last month'} must look like 2026-10.`));
+    }
+    const p = (req.params ?? {}) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(p)) if (/id$/i.test(k) && !/^\d+$/.test(String(v))) throw new BooksError('That entry was not found.');
+  });
   const users = installAuth(app, books);
 
   const num = (v: string | undefined) => (v === undefined || v === '' ? undefined : Number(v));
@@ -249,7 +264,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const to = asOf(q);
     return ewayCandidates(books, q.from || to, to, q.all === '1');
   });
-  app.post('/api/gst/eway-json', async (req) => ewayBillJson(books, (req.body as { ids: number[] }).ids ?? []));
+  app.post('/api/gst/eway-json', async (req) => ewayBillJson(books, Array.isArray((req.body as { ids?: unknown })?.ids) ? (req.body as { ids: number[] }).ids : (() => { throw new BooksError('Choose the bills for the e-Way Bill.'); })()));
 
   // ----- utilities -----
   app.post('/api/import/tally', { bodyLimit: 30 * 1024 * 1024 }, async (req) => {

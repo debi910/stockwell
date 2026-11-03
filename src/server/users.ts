@@ -220,6 +220,12 @@ export function installAuth(app: FastifyInstance, books: Books): Users {
       const d = (req.body as { date?: string } | null)?.date;
       if (d !== todayISO()) { reply.status(403).send({ error: "A Billing operator can only keep a voucher on today's date." }); return; }
     }
+    if (u?.role === 'operator' && req.method === 'POST' && route === '/api/vouchers') {
+      const b = (req.body ?? {}) as { date?: string; type?: string };
+      // Back-dated entries and stock counts change closed days or stock value: the owner does those.
+      if (b.date !== todayISO()) { reply.status(403).send({ error: "A Billing operator can only make vouchers on today's date. Ask the owner for an older date." }); return; }
+      if (b.type === 'physical_stock') { reply.status(403).send({ error: 'Only an Owner can post a stock count (Physical Stock).' }); return; }
+    }
     done();
   });
 

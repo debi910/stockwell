@@ -14,7 +14,7 @@
     "build": "npm run build:ui && npm run build:electron",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run tests/core tests/api",
+    "test": "vitest run tests/core tests/api tests/qa/fmcg tests/qa/pharma",
     "test:e2e": "npm run build:ui && vitest run tests/e2e",
     "dist": "npm run build && electron-builder --win --publish never"
   },

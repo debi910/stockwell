@@ -44,7 +44,7 @@ const nameOf = (n: Node) => text(n['@_NAME']) || text(n.NAME) || text(list(n['NA
 
 /** Tally writes debit amounts as negative numbers; Stockwell keeps debit as positive. */
 const tallyAmount = (v: unknown) => -toPaise(text(v).replace(/[^\d.-]/g, '') || '0');
-const firstNumber = (v: unknown) => Number((text(v).match(/-?[\d.]+/) ?? ['0'])[0]);
+const firstNumber = (v: unknown) => Number((text(v).replace(/,/g, '').match(/-?[\d.]+/) ?? ['0'])[0]);
 
 /** Tally dates: 20260401, 1-Apr-2026, 01-04-2026 or 2026-04-01 → YYYY-MM-DD (or null). */
 export function tallyDate(v: unknown): string | null {
@@ -77,7 +77,11 @@ export interface TallyMasters {
 
 export function parseTallyMasters(xml: string): TallyMasters {
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false, trimValues: true });
-  const doc = parser.parse(xml);
+  if (typeof xml !== 'string' || !/<\s*(ENVELOPE|TALLYMESSAGE|LEDGER|STOCKITEM|GROUP)\b/i.test(xml)) {
+    throw new BooksError('This is not a Tally export. In TallyPrime, export the masters as XML (Alt+E > Masters > Format: XML) and choose that file.');
+  }
+  let doc: unknown;
+  try { doc = parser.parse(xml); } catch { throw new BooksError('The Tally file could not be read. Export it again from TallyPrime as XML.'); }
   const found: Record<string, Node[]> = { GROUP: [], LEDGER: [], UNIT: [], STOCKGROUP: [], STOCKITEM: [], GODOWN: [] };
   const walk = (n: unknown) => {
     if (!n || typeof n !== 'object') return;
@@ -150,6 +154,7 @@ const stateCode = (name: string) => Object.entries(STATES).find(([, n]) => n.toL
 /** Adds Tally masters that Stockwell does not have yet. Existing names are left alone. */
 export function importTallyMasters(books: Books, m: TallyMasters) {
   const result = { groups: 0, ledgers: 0, units: 0, stockGroups: 0, items: 0, bills: 0, batches: 0, godowns: 0, skipped: [] as string[] };
+  const moves: { itemId: number; lines: { batch: string; godown: string; qty: number; value: number }[] }[] = [];
   books.db.transaction(() => {
     const haveGroup = (n: string) => books.db.prepare(`SELECT id FROM groups WHERE name=? COLLATE NOCASE`).get(n) as { id: number } | undefined;
     // Parents first: keep looping until no more groups can be placed.
@@ -218,14 +223,40 @@ export function importTallyMasters(books: Books, m: TallyMasters) {
         books.db.prepare(`DELETE FROM batches WHERE item_id=? AND batch_no='Opening'`).run(created.id);
         let left = i.openingQty;
         for (const b of realBatches) {
+          if (b.mfg && b.expiry && b.expiry < b.mfg) {
+            result.skipped.push(`Batch ${b.name} of ${i.name}: expiry ${b.expiry} is before its manufacturing date ${b.mfg}, so the manufacturing date was left out. Check it in Tally.`);
+            b.mfg = null;
+          }
           books.db.prepare(`INSERT INTO batches (item_id, batch_no, mfg_date, expiry_date, opening_qty) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(item_id, batch_no) DO UPDATE SET opening_qty=opening_qty+excluded.opening_qty`).run(created.id, b.name.slice(0, 40), b.mfg, b.expiry, b.qty);
           left -= b.qty;
           result.batches++;
         }
-        if (Math.abs(left) > 1e-9) books.db.prepare(`INSERT INTO batches (item_id, batch_no, opening_qty) VALUES (?, 'Opening', ?)`).run(created.id, Math.round(left * 1000) / 1000);
+        if (left > 1e-9) books.db.prepare(`INSERT INTO batches (item_id, batch_no, opening_qty) VALUES (?, 'Opening', ?)`).run(created.id, Math.round(left * 1000) / 1000);
+        else if (left < -1e-9) {
+          // The batches hold more than the item's opening: trust the batches (they are what is on the shelf).
+          const total = Math.round((i.openingQty - left) * 1000) / 1000;
+          books.db.prepare(`UPDATE items SET opening_qty=? WHERE id=?`).run(total, created.id);
+          result.skipped.push(`${i.name}: the batches add up to ${total}, more than the item opening of ${i.openingQty}. The opening was set to ${total}; check it in Tally.`);
+        }
+        // Stock kept in other Tally godowns: opening stock starts in the Main Location, so move it with a Stock Journal on the first day.
+        const away = realBatches.filter((b) => b.godown && b.qty > 0 && b.godown.toLowerCase() !== 'main location');
+        if (away.length) moves.push({ itemId: created.id, lines: away.map((b) => ({ batch: b.name.slice(0, 40), godown: b.godown, qty: b.qty, value: b.value })) });
       }
       result.items++;
+    }
+    const from = books.company().books_from;
+    for (const mv of moves) {
+      const lines: Record<string, unknown>[] = [];
+      for (const l of mv.lines) {
+        const bid = (books.db.prepare(`SELECT id FROM batches WHERE item_id=? AND batch_no=?`).get(mv.itemId, l.batch) as { id: number } | undefined)?.id;
+        let gid = (books.db.prepare(`SELECT id FROM godowns WHERE name=? COLLATE NOCASE`).get(l.godown) as { id: number } | undefined)?.id;
+        if (!gid) gid = (books.createGodown(l.godown) as { id: number }).id;
+        if (!bid || gid === 1) continue;
+        const rate = l.qty ? Math.round(l.value / l.qty) : 0;
+        lines.push({ itemId: mv.itemId, batchId: bid, qty: l.qty, rate, direction: 'out', godownId: 1 }, { itemId: mv.itemId, batchId: bid, qty: l.qty, rate, direction: 'in', godownId: gid });
+      }
+      if (lines.length) books.createVoucher({ type: 'stock_journal', date: from, narration: 'Opening stock in other godowns (from Tally)', lines } as never);
     }
   })();
   return result;

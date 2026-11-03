@@ -16,7 +16,7 @@ const fail = (msg: string): never => {
   throw new BooksError(msg);
 };
 /** A date as YYYY-MM-DD that really exists, or null when empty; anything else is refused. */
-const isoDate = (v: unknown, what: string): string | null => {
+export const isoDate = (v: unknown, what: string): string | null => {
   if (v === undefined || v === null || v === '') return null;
   const t = String(v);
   const d = new Date(`${t}T00:00:00Z`);
@@ -193,7 +193,7 @@ export class Books {
     if (!keys.length) return this.company();
     const before = this.company();
     if (patch.books_from !== undefined && patch.books_from !== before.books_from) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(patch.books_from))) fail('Enter the books start date as YYYY-MM-DD.');
+      if (!isoDate(patch.books_from, 'The books start date')) fail('Enter the books start date as YYYY-MM-DD.');
       const earlier = this.db.prepare(`SELECT number, date FROM vouchers WHERE date<? LIMIT 1`).get(patch.books_from) as { number: string; date: string } | undefined;
       if (earlier) fail(`Voucher ${earlier.number} is dated ${earlier.date}, before ${patch.books_from}. The books start date cannot move past existing vouchers.`);
     }
@@ -267,8 +267,18 @@ export class Books {
   }
 
   private cleanLedger(input: Partial<Ledger>): Partial<Ledger> {
+    if (!input || typeof input !== 'object') fail('The ledger details are missing.');
     const l: Partial<Ledger> = { ...input };
-    if (l.name !== undefined) l.name = l.name.trim() || fail('Ledger name is required.');
+    for (const k of ['name', 'gstin', 'phone', 'email', 'address', 'pan', 'state_code', 'price_level', 'tds_section'] as const) {
+      const v = (l as Record<string, unknown>)[k];
+      if (v !== undefined && v !== null && typeof v !== 'string') fail(`The ledger's ${k.replace('_', ' ')} must be text.`);
+    }
+    if (l.name !== undefined) l.name = (l.name ?? '').trim().slice(0, 100) || fail('Ledger name is required.');
+    if (l.state_code) {
+      l.state_code = String(l.state_code).trim().padStart(2, '0');
+      const n = Number(l.state_code);
+      if (!/^\d{2}$/.test(l.state_code) || !((n >= 1 && n <= 38) || n === 97)) fail(`State code ${l.state_code} is not a GST state code (01 to 38, or 97 for other territory).`);
+    }
     if (l.gstin) {
       l.gstin = l.gstin.trim().toUpperCase();
       if (!isValidGstin(l.gstin)) fail(`GSTIN ${l.gstin} is not valid. Check the 15 characters.`);
@@ -276,8 +286,10 @@ export class Books {
     }
     if (l.phone) l.phone = l.phone.replace(/[^\d+]/g, '');
     if (l.opening !== undefined) {
-      if (!Number.isFinite(Number(l.opening))) fail('Opening balance must be a number.');
-      l.opening = Math.round(Number(l.opening));
+      const o = Number(l.opening);
+      if (!Number.isFinite(o) || Math.abs(o) >= 1e13) fail('Opening balance must be a number below ₹1 lakh crore.');
+      if (!Number.isInteger(o)) fail('Opening balance must be in whole paise.');
+      l.opening = o;
     }
     if (l.credit_days !== undefined && !(Number(l.credit_days) >= 0 && Number(l.credit_days) <= 3650)) fail('Credit days must be between 0 and 3650.');
     if (l.credit_limit !== undefined) {
@@ -286,7 +298,10 @@ export class Books {
     }
     if (l.tds_rate !== undefined && !(Number(l.tds_rate) >= 0 && Number(l.tds_rate) <= 100)) fail('The TDS rate must be between 0 and 100%.');
     for (const k of ['block_overdue', 'assessable'] as const) if (l[k] !== undefined) l[k] = l[k] ? 1 : 0;
-    if (l.price_level !== undefined) l.price_level = String(l.price_level ?? '').trim().slice(0, 40);
+    if (l.price_level !== undefined) {
+      l.price_level = String(l.price_level ?? '').trim().slice(0, 40);
+      if (l.price_level && !this.priceLevels().includes(l.price_level)) fail(`There is no price level "${l.price_level}". Add it in Company Features (F11) first.`);
+    }
     if (l.tds_section !== undefined) l.tds_section = String(l.tds_section ?? '').trim().slice(0, 20);
     // Users may mark their own TDS/TCS ledgers; the GST and round-off ledgers are Stockwell's own.
     if (l.tax_kind !== undefined) {
@@ -527,9 +542,17 @@ export class Books {
     }
     if (i.gst_rate !== undefined && !(Number(i.gst_rate) >= 0 && Number(i.gst_rate) <= 40)) fail('GST rate must be between 0 and 40%.');
     if (i.taxability !== undefined && !TAXABILITY.includes(i.taxability)) fail('Taxability must be taxable, nil, exempt or non-GST.');
+    if (!i || typeof i !== 'object') fail('The item details are missing.');
+    for (const k of ['name', 'hsn'] as const) {
+      const v = (i as Record<string, unknown>)[k];
+      if (v !== undefined && v !== null && typeof v !== 'string') fail(`The item's ${k === 'hsn' ? 'HSN' : k} must be text.`);
+    }
     for (const k of ['opening_qty', 'reorder_level', 'scheme_buy', 'scheme_free', 'mrp', 'sale_rate', 'purchase_rate', 'opening_value'] as const) {
       if (i[k] !== undefined && i[k] !== null && !(Number(i[k]) >= 0)) fail('Quantities and rates on an item cannot be negative.');
+      const qtyField = k === 'opening_qty' || k === 'reorder_level' || k === 'scheme_buy' || k === 'scheme_free';
+      if (i[k] !== undefined && i[k] !== null && Number(i[k]) > (qtyField ? 1e7 : 1e13)) fail(`That ${qtyField ? 'quantity' : 'amount'} is too large.`);
     }
+    if (i.opening_value !== undefined && i.opening_value !== null) i.opening_value = Math.round(Number(i.opening_value));
     if (i.unit_id !== undefined && !this.db.prepare(`SELECT 1 FROM units WHERE id=?`).get(i.unit_id)) fail('Choose a unit for the item.');
     if (i.alt_unit_id) {
       if (!this.db.prepare(`SELECT 1 FROM units WHERE id=?`).get(i.alt_unit_id)) fail('Choose the alternate unit from the list.');
@@ -555,6 +578,16 @@ export class Books {
   }
 
   updateItem(id: number, patch: Partial<Item>) {
+    return this.db.transaction(() => {
+      const lows = this.stockLows([id]);
+      const r = this.updateItemRow(id, patch);
+      this.assertStockKept(lows, [id], `With the new opening stock,`);
+      return r;
+    })();
+  }
+
+  private updateItemRow(id: number, patch: Partial<Item>) {
+    if (!patch || typeof patch !== 'object') fail('The item details are missing.');
     const before = this.item(id);
     const keys = Object.keys(patch).filter((k) => (ITEM_COLS as readonly string[]).includes(k));
     this.checkItem({ ...patch, unit_id: patch.unit_id ?? before.unit_id, alt_unit_id: 'alt_unit_id' in patch ? patch.alt_unit_id : before.alt_unit_id, alt_conv: patch.alt_conv ?? before.alt_conv });
@@ -568,6 +601,19 @@ export class Books {
       const row: Record<string, unknown> = { ...patch, id };
       if ('track_batch' in row) row.track_batch = row.track_batch ? 1 : 0;
       this.db.prepare(`UPDATE items SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE id=@id`).run(row);
+    }
+    // Batch items keep their opening stock in batches: move the difference into the "Opening" batch, so batch-wise stock matches.
+    const after = this.item(id);
+    if (after.track_batch && patch.opening_qty !== undefined && Number(patch.opening_qty) !== before.opening_qty) {
+      const inBatches = (this.db.prepare(`SELECT COALESCE(SUM(opening_qty),0) q FROM batches WHERE item_id=?`).get(id) as { q: number }).q;
+      const diff = Math.round((after.opening_qty - inBatches) * 1000) / 1000;
+      if (diff) {
+        const ob = this.db.prepare(`SELECT id, opening_qty FROM batches WHERE item_id=? AND batch_no='Opening'`).get(id) as { id: number; opening_qty: number } | undefined
+          ?? this.db.prepare(`SELECT id, opening_qty FROM batches WHERE item_id=? AND opening_qty>0 ORDER BY id DESC LIMIT 1`).get(id) as { id: number; opening_qty: number } | undefined;
+        if (ob && ob.opening_qty + diff >= 0) this.db.prepare(`UPDATE batches SET opening_qty=? WHERE id=?`).run(ob.opening_qty + diff, ob.id);
+        else if (!ob && diff > 0) this.db.prepare(`INSERT INTO batches (item_id, batch_no, opening_qty) VALUES (?, 'Opening', ?)`).run(id, diff);
+        else fail(`The opening batches of ${after.name} hold ${inBatches}. Lower the batch openings first, or set the opening to at least that.`);
+      }
     }
     this.audit('item', id, 'update', { before, patch });
     return this.item(id);
@@ -587,8 +633,17 @@ export class Books {
   private ensureBatch(itemId: number, l: InventoryLineInput): number | null {
     if (l.batchId) return l.batchId;
     if (!l.batchNo) return null;
-    const existing = this.db.prepare(`SELECT id FROM batches WHERE item_id=? AND batch_no=?`).get(itemId, l.batchNo) as { id: number } | undefined;
-    if (existing) return existing.id;
+    if (typeof l.batchNo !== 'string' && typeof l.batchNo !== 'number') fail('The batch number must be text.');
+    const existing = this.db.prepare(`SELECT id, expiry_date FROM batches WHERE item_id=? AND batch_no=?`).get(itemId, String(l.batchNo)) as { id: number; expiry_date: string | null } | undefined;
+    if (existing) {
+      const exp = isoDate(l.expiryDate, `The expiry date of batch ${l.batchNo}`);
+      if (exp && existing.expiry_date && exp !== existing.expiry_date) fail(`Batch ${l.batchNo} is already in stock with expiry ${existing.expiry_date}, not ${exp}. Check the expiry, or use a different batch number.`);
+      if (exp && !existing.expiry_date) this.db.prepare(`UPDATE batches SET expiry_date=? WHERE id=?`).run(exp, existing.id);
+      return existing.id;
+    }
+    const mfg = isoDate(l.mfgDate, 'The manufacturing date');
+    const exp = isoDate(l.expiryDate, `The expiry date of batch ${l.batchNo}`);
+    if (mfg && exp && exp < mfg) fail(`Batch ${l.batchNo}: the expiry date ${exp} is before the manufacturing date ${mfg}.`);
     const r = this.db.prepare(`INSERT INTO batches (item_id, batch_no, mfg_date, expiry_date) VALUES (?, ?, ?, ?)`)
       .run(itemId, String(l.batchNo).slice(0, 40), isoDate(l.mfgDate, 'The manufacturing date'), isoDate(l.expiryDate, `The expiry date of batch ${l.batchNo}`));
     return Number(r.lastInsertRowid);
@@ -614,7 +669,10 @@ export class Books {
         const done = this.db.prepare(`SELECT id FROM vouchers WHERE client_key=?`).get(key) as { id: number } | undefined;
         if (done) return this.voucher(done.id); // the same save arriving twice
       }
+      const touched = this.lineItemIds(input);
+      const before = this.stockLows(touched);
       const v = this.writeVoucher(input, null);
+      this.assertStockKept(before, touched, `With ${v.number},`);
       if (key) this.db.prepare(`UPDATE vouchers SET client_key=? WHERE id=?`).run(key, v.id);
       return this.voucher(v.id);
     })();
@@ -624,7 +682,11 @@ export class Books {
     return this.db.transaction(() => {
       const before = this.voucher(id);
       if (before.cancelled) fail('A cancelled voucher cannot be changed.');
-      return this.writeVoucher({ ...input, type: before.type as VoucherType }, before);
+      const touched = [...this.itemsOf(id), ...this.lineItemIds(input)];
+      const lows = this.stockLows(touched);
+      const v = this.writeVoucher({ ...input, type: before.type as VoucherType }, before);
+      this.assertStockKept(lows, touched, `After this change to ${before.number},`);
+      return v;
     })();
   }
 
@@ -650,8 +712,11 @@ export class Books {
         fail(`${v.number} cannot be cancelled: ${[...new Set(dep.found.map((d) => d.number))].join(', ')} ${dep.found.length > 1 ? 'are' : 'is'} set against it. Alter or cancel ${dep.found.length > 1 ? 'those' : 'that'} first.`);
       }
       this.checkLinks(v);
+      const touched = this.itemsOf(id);
+      const lows = this.stockLows(touched);
       if (!v.optional) this.checkStockWithout(v);
       this.db.prepare(`UPDATE vouchers SET cancelled=1, updated_at=datetime('now') WHERE id=?`).run(id);
+      this.assertStockKept(lows, touched, `Without ${v.number},`);
       if (v.bounce_of) this.db.prepare(`UPDATE vouchers SET bounced_by=NULL WHERE id=?`).run(v.bounce_of);
       this.db.prepare(`DELETE FROM bills WHERE voucher_id=?`).run(id);
       this.audit('voucher', id, 'cancel', v);
@@ -672,7 +737,10 @@ export class Books {
       if (!v.cancelled && !v.optional) this.checkStockWithout(v);
       if ((v as unknown as { ewb_no?: string }).ewb_no && !v.cancelled) fail(`${v.number} has an e-Way Bill (${(v as unknown as { ewb_no?: string }).ewb_no}). Cancel the e-Way Bill on the portal and then cancel this voucher (Alt+X) instead.`);
       this.audit('voucher', id, 'delete', v);
+      const touched = this.itemsOf(id);
+      const lows = this.stockLows(touched);
       for (const t of ['entries', 'inventory', 'bills', 'tax_lines', 'voucher_charges']) this.db.prepare(`DELETE FROM ${t} WHERE voucher_id=?`).run(id);
+      this.assertStockKept(lows, touched, `Without ${v.number},`);
       this.db.prepare(`DELETE FROM vouchers WHERE id=?`).run(id);
       if (v.bounce_of) this.db.prepare(`UPDATE vouchers SET bounced_by=NULL WHERE id=?`).run(v.bounce_of);
       this.db.prepare(`UPDATE vouchers SET against_id=NULL WHERE against_id=?`).run(id);
@@ -725,9 +793,70 @@ export class Books {
     const v = this.voucher(id);
     const d = isoDate(date, 'The bank date');
     if (d && d < v.date) fail('The bank date cannot be before the voucher date.');
+    if (d && d > addDays(v.date, 400)) fail(`The bank date ${d} is more than a year after the voucher (${v.date}). Check the year.`);
+    const bank = this.db.prepare(`
+      WITH RECURSIVE g(id) AS (SELECT id FROM groups WHERE name IN ('Bank Accounts', 'Bank OD A/c') UNION SELECT c.id FROM groups c JOIN g ON c.parent_id=g.id)
+      SELECT 1 FROM entries e JOIN ledgers l ON l.id=e.ledger_id WHERE e.voucher_id=? AND l.group_id IN (SELECT id FROM g) LIMIT 1`).get(id);
+    if (!bank) fail(`${v.number} does not touch a bank account, so it has no bank date.`);
     this.db.prepare(`UPDATE vouchers SET bank_date=? WHERE id=?`).run(d, id);
     this.audit('voucher', id, 'bank-date', { date: d });
     return { id, bank_date: d };
+  }
+
+
+  /**
+   * The lowest stock an item reaches on any day (overall, in each godown and in each batch), with the first day it
+   * goes below zero. Used before and after a change: a change may not make stock go below zero on ANY date,
+   * not just on the voucher's own date or at year end (a back-dated sale, or a purchase altered after its goods were sold).
+   */
+  private stockLows(itemIds: Iterable<number>) {
+    const lows = new Map<string, { min: number; date: string; what: string }>();
+    const note = (key: string, min: number, date: string, what: string) => lows.set(key, { min, date, what });
+    for (const itemId of new Set(itemIds)) {
+      const item = this.db.prepare(`SELECT id, name, opening_qty FROM items WHERE id=?`).get(itemId) as { id: number; name: string; opening_qty: number } | undefined;
+      if (!item) continue;
+      const runs = (partition: string, select: string) => this.db.prepare(`
+        SELECT k, date, SUM(delta) OVER (PARTITION BY k ORDER BY date) AS run FROM (
+          SELECT ${select} AS k, v.date, SUM(iv.direction * (iv.qty + iv.free_qty)) AS delta
+          FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id
+          WHERE iv.item_id=? AND v.cancelled=0 AND v.optional=0 AND iv.direction<>0 ${partition}
+          GROUP BY k, v.date)`).all(itemId) as { k: number | string; date: string; run: number }[];
+      const scan = (rows: { k: number | string; date: string; run: number }[], opening: (k: number | string) => number, label: (k: number | string) => string, prefix: string) => {
+        const seen = new Set<string>();
+        for (const r of rows) {
+          const key = `${prefix}|${itemId}|${r.k}`;
+          const q = Math.round((opening(r.k) + r.run) * 1000) / 1000;
+          const cur = lows.get(key);
+          if (!seen.has(key)) { seen.add(key); note(key, Math.min(0, q), q < 0 ? r.date : '', label(r.k)); continue; }
+          if (cur && q < cur.min) note(key, q, cur.date || r.date, label(r.k));
+        }
+      };
+      scan(runs('', '0'), () => item.opening_qty, () => item.name, 'i');
+      scan(runs('', 'COALESCE(iv.godown_id,1)'), (g) => (Number(g) === 1 ? item.opening_qty : 0), (g) => `${item.name} in ${this.godownName(Number(g))}`, 'g');
+      const bOpen = new Map((this.db.prepare(`SELECT id, batch_no, opening_qty FROM batches WHERE item_id=?`).all(itemId) as { id: number; batch_no: string; opening_qty: number }[]).map((b) => [b.id, b]));
+      scan(runs('AND iv.batch_id IS NOT NULL', 'iv.batch_id'), (b) => bOpen.get(Number(b))?.opening_qty ?? 0, (b) => `batch ${bOpen.get(Number(b))?.batch_no ?? b} of ${item.name}`, 'b');
+    }
+    return lows;
+  }
+
+  /** Fails when a change made stock go below zero on some date where it did not before. */
+  private assertStockKept(before: Map<string, { min: number; date: string; what: string }>, itemIds: Iterable<number>, why: string) {
+    if (this.company().allow_negative_stock) return;
+    for (const [key, now] of this.stockLows(itemIds)) {
+      const was = before.get(key)?.min ?? 0;
+      if (now.min < -1e-9 && now.min < was - 1e-9) {
+        fail(`${why} the stock of ${now.what} would go below zero on ${now.date} (${now.min}), because other vouchers take it out. Check the dates and quantities.`);
+      }
+    }
+  }
+
+  private lineItemIds(input: VoucherInput): number[] {
+    const lines = Array.isArray(input?.lines) ? input.lines : [];
+    return lines.map((l) => Number((l as { itemId?: unknown })?.itemId)).filter((n) => Number.isInteger(n) && n > 0);
+  }
+
+  private itemsOf(voucherId: number) {
+    return (this.db.prepare(`SELECT DISTINCT item_id FROM inventory WHERE voucher_id=?`).all(voucherId) as { item_id: number }[]).map((r) => r.item_id);
   }
 
   /** Taking out a purchase (or other stock coming in) must not leave later bills selling stock that is not there. */
@@ -835,7 +964,7 @@ export class Books {
     if (!input || typeof input !== 'object') fail('The voucher is empty.');
     const type = input.type;
     if (typeof type !== 'string' || !Object.prototype.hasOwnProperty.call(VOUCHER_TYPES, type)) fail(`Unknown voucher type ${String(type)}.`);
-    if (typeof input.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(input.date) || Number.isNaN(Date.parse(input.date))) fail('Enter a valid date.');
+    if (typeof input.date !== 'string' || !isoDate(input.date, 'The date')) fail('Enter a valid date.');
     for (const k of ['number', 'narration', 'refNo', 'vehicleNo', 'transporterName', 'transporterId', 'ewbNo', 'againstRef', 'chequeNo', 'bankName'] as const) {
       if (input[k] !== undefined && input[k] !== null && typeof input[k] !== 'string') fail(`${k} must be text.`);
     }
@@ -871,7 +1000,8 @@ export class Books {
     if (numbering.number.length > 40) fail('The voucher number is too long.');
     if (type === 'sales' && !optional && numbering.number.length > 16) fail('A GST invoice number can have at most 16 characters.');
     if (type === 'sales' && !/^[A-Za-z0-9/-]+$/.test(numbering.number)) fail('A GST invoice number may use only letters, digits, / and -.');
-    const clash = this.db.prepare(`SELECT id FROM vouchers WHERE type=? AND number=? AND id<>?`).get(type, numbering.number, excludeId);
+    // GST treats S/1 and s/1 as the same invoice number.
+    const clash = this.db.prepare(`SELECT id FROM vouchers WHERE type=? AND number=? COLLATE NOCASE AND id<>?`).get(type, numbering.number, excludeId);
     if (clash) fail(`${vt.label} number ${numbering.number} is already used.`);
 
     const entries: { ledgerId: number; amount: number }[] = [];
@@ -886,8 +1016,10 @@ export class Books {
 
     /** Checks a settlement against a pending bill of the party and returns it, or fails with a clear message. */
     const pendingFor = (ledgerId: number, ref: string) => {
-      const row = this.db.prepare(`SELECT COALESCE(SUM(amount),0) p, SUM(kind='new') n FROM bills WHERE ledger_id=? AND ref=? AND COALESCE(voucher_id,0)<>?`)
-        .get(ledgerId, ref, excludeId) as { p: number; n: number };
+      // Opening bills (and bills brought in from Tally) have no voucher, so they always count.
+      const row = this.db.prepare(`SELECT COALESCE(SUM(amount),0) p, SUM(kind='new') n, MIN(CASE WHEN kind='new' THEN date END) d FROM bills WHERE ledger_id=? AND ref=? AND COALESCE(voucher_id,-1)<>?`)
+        .get(ledgerId, ref, excludeId) as { p: number; n: number; d: string | null };
+      if (row.n && row.d && row.d > input.date) fail(`Bill ${ref} is dated ${row.d}, after this voucher. A payment made before the bill goes on account (or as an advance).`);
       return row;
     };
 
@@ -910,6 +1042,9 @@ export class Books {
 
       // Made against an order, a delivery/receipt note or a rejection: goods that already moved do not move again.
       let move: number = vt.move;
+      // The goods a delivery/receipt note or rejection moved: the bill or note made against it must be for those goods.
+      let noteQty: Map<number, number> | null = null;
+      let noteNumber = '';
       if (input.againstId !== undefined && input.againstId !== null && (input.againstId as unknown) !== '') {
         const src = this.db.prepare(`SELECT id, type, number, party_id, cancelled, optional FROM vouchers WHERE id=?`).get(num(input.againstId, 'order or note')) as
           { id: number; type: VoucherType; number: string; party_id: number; cancelled: number; optional: number } | undefined;
@@ -920,6 +1055,9 @@ export class Books {
           const used = this.db.prepare(`SELECT number FROM vouchers WHERE against_id=? AND cancelled=0 AND optional=0 AND id<>?`).get(src!.id, excludeId) as { number: string } | undefined;
           if (used && !optional) fail(`${src!.number} is already billed in ${used.number}.`);
           move = 0;
+          noteQty = new Map();
+          for (const r of this.db.prepare(`SELECT item_id, SUM(qty + free_qty) q FROM inventory WHERE voucher_id=? GROUP BY item_id`).all(src!.id) as { item_id: number; q: number }[]) noteQty.set(r.item_id, r.q);
+          noteNumber = src!.number;
         }
         againstId = src!.id;
       }
@@ -933,6 +1071,10 @@ export class Books {
           SELECT gl.item_id, gl.gst_rate, gl.hsn FROM gst_lines gl JOIN vouchers v ON v.id=gl.voucher_id
           JOIN bills b ON b.voucher_id=v.id AND b.kind='new' AND b.ref=? AND b.ledger_id=?
           WHERE v.cancelled=0 AND v.optional=0`).all(againstRef, party.id) as { item_id: number | null; gst_rate: number; hsn: string }[];
+        // A return on a bill made while the party was unregistered stays B2C in the returns, even if it registers later.
+        const origBill = this.db.prepare(`SELECT v.party_gstin FROM vouchers v JOIN bills b ON b.voucher_id=v.id AND b.kind='new' AND b.ref=? AND b.ledger_id=?
+          WHERE v.cancelled=0 AND v.optional=0 LIMIT 1`).get(againstRef, party.id) as { party_gstin: string } | undefined;
+        if (origBill && !origBill.party_gstin) snapshot = { ...snapshot, gstin: '' };
         for (const o of orig) {
           if (o.item_id) originalRates.set(o.item_id, o.gst_rate);
           if (o.hsn && !originalHsn.has(o.gst_rate)) originalHsn.set(o.gst_rate, o.hsn);
@@ -959,7 +1101,7 @@ export class Books {
         if (!Number.isInteger(roundOff) || Math.abs(roundOff) > 1000) fail('Round off can be at most ₹10 either way.');
       }
 
-      type Prepared = { item: Item | null; ledger?: Ledger; qty: number; free: number; rate: number; disc: number; gstRate: number; batchId: number | null; godownId: number; altQty: number | null; hsn?: string; taxability?: string };
+      type Prepared = { item: Item | null; mrp?: number | null; ledger?: Ledger; qty: number; free: number; rate: number; disc: number; gstRate: number; batchId: number | null; godownId: number; altQty: number | null; hsn?: string; taxability?: string };
       const prepared: Prepared[] = [];
       if (mode === 'accounting') {
         const tl = Array.isArray(input.taxLines) ? input.taxLines : [];
@@ -1016,8 +1158,10 @@ export class Books {
             fail(`Add a 4, 6 or 8 digit HSN code to "${item.name}" first (Alter → Stock Item). GSTR-1 needs it.`);
           }
           // Keep the rate to 1/100 paise, so landing rates like ₹42.3729 are not cut short before qty × rate.
-          const exactRate = Math.round(rate * 100) / 100;
-          const base = { item, qty, free, rate: exactRate, disc, gstRate, godownId: gid, altQty };
+          // A rate per case/box is kept exact per piece, so cases × case rate comes out to the paisa.
+          const exactRate = altQty !== null ? rate : Math.round(rate * 100) / 100;
+          const lineMrp = l.mrp !== undefined && l.mrp !== null && (l.mrp as unknown) !== '' && Number(l.mrp) > 0 ? Math.round(Number(l.mrp)) : null;
+          const base = { item, qty, free, rate: exactRate, disc, gstRate, godownId: gid, altQty, mrp: lineMrp };
           needByItem.set(`${item.id}|${gid}`, (needByItem.get(`${item.id}|${gid}`) ?? 0) + qty + free);
           if (l.mrp !== undefined && l.mrp !== null && (l.mrp as unknown) !== '' && !(num(l.mrp, 'MRP') >= 0)) fail(`MRP for ${item.name} cannot be negative.`);
 
@@ -1029,6 +1173,10 @@ export class Books {
           if (move > 0) {
             const bid = l.batchId ? this.ownBatch(item.id, l.batchId) : this.ensureBatch(item.id, l);
             if (!bid) fail(`Enter a batch number for ${item.name}.`);
+            if (type === 'purchase' || type === 'receipt_note') {
+              const b = this.db.prepare(`SELECT batch_no, expiry_date FROM batches WHERE id=?`).get(bid) as { batch_no: string; expiry_date: string | null };
+              if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${b.expiry_date}, before this bill. Check the expiry date.`);
+            }
             if (l.mrp && Number(l.mrp) > 0) this.db.prepare(`UPDATE batches SET mrp=? WHERE id=?`).run(Math.round(Number(l.mrp)), bid);
             prepared.push({ ...base, batchId: bid });
             continue;
@@ -1044,9 +1192,19 @@ export class Books {
           }
           // Outward without a chosen batch: take from the soonest-expiring batches that are not expired (FEFO),
           // splitting the line when one batch does not have enough.
-          for (const part of this.allocateBatches(item, qty, free, input.date, excludeId, gid)) prepared.push({ ...base, ...part, altQty: part.qty === qty ? altQty : null });
+          for (const part of this.allocateBatches(item, qty, free, input.date, excludeId, gid, type === 'debit_note' || type === 'rejection_out')) prepared.push({ ...base, ...part, altQty: altQty === null ? null : Math.round((altQty * part.qty / qty) * 1000) / 1000 });
         }
 
+        if (noteQty) {
+          const billed = new Map<number, number>();
+          for (const p of prepared) if (p.item) billed.set(p.item.id, (billed.get(p.item.id) ?? 0) + p.qty + p.free);
+          for (const [itemId, q] of billed) {
+            const had = noteQty.get(itemId);
+            if (had === undefined) fail(`${this.item(itemId).name} is not on ${noteNumber}. Bill only the goods it moved, or make a separate voucher for the rest.`);
+            if (Math.abs(q - had!) > 1e-9) fail(`${noteNumber} moved ${had} of ${this.item(itemId).name}; this voucher has ${q}. They must match, because the stock already moved with ${noteNumber}.`);
+          }
+          for (const [itemId, had] of noteQty) if (!billed.has(itemId)) fail(`${noteNumber} also moved ${had} of ${this.item(itemId).name}. Bill all of its goods.`);
+        }
         if (move < 0 && !company.allow_negative_stock && !optional) {
           for (const [key, need] of needByItem) {
             const [itemId, g] = key.split('|').map(Number);
@@ -1068,6 +1226,8 @@ export class Books {
             line_no: invLines.length + 1, item_id: p.item.id, batch_id: p.batchId, qty: p.qty, free_qty: p.free, rate: p.rate,
             discount_pct: p.disc, gst_rate: p.gstRate, taxable: t.taxable, cgst: t.cgst, sgst: t.sgst, igst: t.igst, direction,
             godown_id: p.godownId === 1 ? null : p.godownId, alt_qty: p.altQty, base_taxable: totals.allocated[i] ? totals.baseTaxable[i] : null,
+            hsn: p.item.hsn || '', uqc: (this.db.prepare(`SELECT uqc FROM units WHERE id=?`).get(p.item.unit_id) as { uqc: string } | undefined)?.uqc ?? 'OTH',
+            mrp: p.mrp ?? ((p.batchId ? (this.db.prepare(`SELECT mrp FROM batches WHERE id=?`).get(p.batchId) as { mrp: number } | undefined)?.mrp : 0) || p.item.mrp || null),
           });
         } else {
           taxRows.push({ line_no: taxRows.length + 1, ledger_id: p.ledger!.id, hsn: p.hsn ?? '', gst_rate: p.gstRate, taxable: t.taxable, cgst: t.cgst, sgst: t.sgst, igst: t.igst, taxability: p.taxability ?? 'taxable', base: totals.baseTaxable[i] });
@@ -1121,7 +1281,7 @@ export class Books {
           let ref = numbering.number;
           if (type === 'purchase' && input.refNo?.trim()) {
             ref = input.refNo.trim().slice(0, 40);
-            const prior = this.db.prepare(`SELECT b.date FROM bills b WHERE b.ledger_id=? AND b.ref=? AND b.kind='new' AND COALESCE(b.voucher_id,0)<>?`)
+            const prior = this.db.prepare(`SELECT b.date FROM bills b WHERE b.ledger_id=? AND b.ref=? COLLATE NOCASE AND b.kind='new' AND COALESCE(b.voucher_id,-1)<>?`)
               .get(party.id, ref, excludeId) as { date: string } | undefined;
             if (prior) {
               if (financialYear(prior.date).label === financialYear(input.date).label) fail(`Supplier bill ${ref} from ${party.name} is already entered.`);
@@ -1215,8 +1375,22 @@ export class Books {
       if (dep.found.length) {
         const keeps = dep.own.every((o) => bills.some((b) => b.kind === 'new' && b.ledgerId === o.ledger_id && b.ref === o.ref));
         if (!keeps) fail(`${existing.number} has ${[...new Set(dep.found.map((d) => d.number))].join(', ')} set against it, so its party and bill number cannot change.`);
+        for (const o of dep.own) {
+          const settled = (this.db.prepare(`SELECT COALESCE(SUM(b.amount),0) s FROM bills b JOIN vouchers v2 ON v2.id=b.voucher_id
+            WHERE b.ledger_id=? AND b.ref=? AND b.kind='agst' AND b.voucher_id<>? AND v2.cancelled=0 AND v2.optional=0`).get(o.ledger_id, o.ref, existing.id) as { s: number }).s;
+          const raised = bills.filter((b) => b.kind === 'new' && b.ledgerId === o.ledger_id && b.ref === o.ref).reduce((a, b) => a + b.amount, 0);
+          if (Math.abs(settled) > Math.abs(raised)) fail(`₹${(Math.abs(settled) / 100).toFixed(2)} has already been received or adjusted against ${o.ref}, more than the new total of ₹${(Math.abs(raised) / 100).toFixed(2)}. Alter the receipt first.`);
+        }
       }
       const follower = this.db.prepare(`SELECT number FROM vouchers WHERE against_id=? AND cancelled=0 AND optional=0`).get(existing.id) as { number: string } | undefined;
+      if (follower && ['delivery_note', 'receipt_note', 'rejection_in', 'rejection_out'].includes(type)) {
+        const qtyMap = (rows: { item_id: unknown; qty: unknown; free_qty: unknown }[]) => {
+          const m = new Map<number, number>();
+          for (const r of rows) m.set(Number(r.item_id), (m.get(Number(r.item_id)) ?? 0) + Number(r.qty) + Number(r.free_qty || 0));
+          return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => `${k}:${v}`).join(',');
+        };
+        if (qtyMap(existing.lines as never) !== qtyMap(invLines as never)) fail(`${follower.number} is made against ${existing.number}, so its items and quantities cannot change. Alter or cancel ${follower.number} first.`);
+      }
       if (follower && (optional || header.party_id !== existing.party_id)) fail(`${follower.number} is made against ${existing.number}, so its party cannot change and it cannot become optional.`);
       if ((existing as { bounced_by?: number | null }).bounced_by) fail(`The cheque in ${existing.number} bounced. Delete the bounce entry first to change it.`);
     }
@@ -1245,9 +1419,9 @@ export class Books {
     }
     const insE = this.db.prepare(`INSERT INTO entries (voucher_id, ledger_id, amount) VALUES (?, ?, ?)`);
     for (const e of entries) if (e.amount) insE.run(id, e.ledgerId, e.amount);
-    const insI = this.db.prepare(`INSERT INTO inventory (voucher_id, line_no, item_id, batch_id, qty, free_qty, rate, discount_pct, gst_rate, taxable, cgst, sgst, igst, direction, godown_id, alt_qty, base_taxable)
-      VALUES (@voucher_id, @line_no, @item_id, @batch_id, @qty, @free_qty, @rate, @discount_pct, @gst_rate, @taxable, @cgst, @sgst, @igst, @direction, @godown_id, @alt_qty, @base_taxable)`);
-    for (const l of invLines) insI.run({ godown_id: null, alt_qty: null, base_taxable: null, ...l, voucher_id: id });
+    const insI = this.db.prepare(`INSERT INTO inventory (voucher_id, line_no, item_id, batch_id, qty, free_qty, rate, discount_pct, gst_rate, taxable, cgst, sgst, igst, direction, godown_id, alt_qty, base_taxable, mrp, hsn, uqc)
+      VALUES (@voucher_id, @line_no, @item_id, @batch_id, @qty, @free_qty, @rate, @discount_pct, @gst_rate, @taxable, @cgst, @sgst, @igst, @direction, @godown_id, @alt_qty, @base_taxable, @mrp, @hsn, @uqc)`);
+    for (const l of invLines) insI.run({ godown_id: null, alt_qty: null, base_taxable: null, mrp: null, hsn: null, uqc: null, ...l, voucher_id: id });
     const insT = this.db.prepare(`INSERT INTO tax_lines (voucher_id, line_no, ledger_id, hsn, gst_rate, taxable, cgst, sgst, igst, taxability, base)
       VALUES (@voucher_id, @line_no, @ledger_id, @hsn, @gst_rate, @taxable, @cgst, @sgst, @igst, @taxability, @base)`);
     for (const t of taxRows) insT.run({ ...t, voucher_id: id });
@@ -1271,8 +1445,8 @@ export class Books {
    * Splits an outward quantity over batches, soonest expiry first, skipping expired ones (FEFO).
    * Free quantity is taken after the paid quantity.
    */
-  private allocateBatches(item: Item, qty: number, free: number, date: string, excludeVoucher: number, godownId = 1) {
-    const list = this.batches(item.id, date, excludeVoucher, godownId).filter((b) => b.qty > 0 && !(b.expiry_date && b.expiry_date < date));
+  private allocateBatches(item: Item, qty: number, free: number, date: string, excludeVoucher: number, godownId = 1, includeExpired = false) {
+    const list = this.batches(item.id, date, excludeVoucher, godownId).filter((b) => b.qty > 0 && (includeExpired || !(b.expiry_date && b.expiry_date < date)));
     let paidLeft = qty;
     let freeLeft = free;
     const parts: { qty: number; free: number; batchId: number }[] = [];
@@ -1305,8 +1479,8 @@ export class Books {
     if (!v) fail(`Voucher ${id} not found.`);
     const entries = this.db.prepare(`SELECT e.ledger_id, l.name AS ledger_name, e.amount FROM entries e JOIN ledgers l ON l.id=e.ledger_id WHERE voucher_id=? ORDER BY e.id`).all(id);
     const lines = this.db.prepare(`
-      SELECT iv.*, i.name AS item_name, i.hsn, u.symbol AS unit, u.uqc, au.symbol AS alt_unit, i.alt_conv, b.batch_no, b.expiry_date,
-        COALESCE(NULLIF(b.mrp,0), i.mrp) AS mrp, g.name AS godown
+      SELECT iv.*, i.name AS item_name, u.symbol AS unit, au.symbol AS alt_unit, i.alt_conv, b.batch_no, b.expiry_date,
+        COALESCE(iv.mrp, NULLIF(b.mrp,0), i.mrp) AS mrp, COALESCE(iv.hsn, i.hsn) AS hsn, COALESCE(iv.uqc, u.uqc) AS uqc, g.name AS godown
       FROM inventory iv JOIN items i ON i.id=iv.item_id JOIN units u ON u.id=i.unit_id LEFT JOIN units au ON au.id=i.alt_unit_id
       LEFT JOIN batches b ON b.id=iv.batch_id LEFT JOIN godowns g ON g.id=iv.godown_id
       WHERE voucher_id=? ORDER BY line_no`).all(id);
