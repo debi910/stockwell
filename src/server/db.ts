@@ -238,6 +238,60 @@ function migrate(db: DB) {
   // Group names exactly as TallyPrime spells them, so Tally imports and staff habits line up.
   db.prepare(`UPDATE groups SET name='Branch/Divisions' WHERE name='Branch / Divisions'`).run();
   db.prepare(`UPDATE groups SET name='Misc. Expenses (ASSET)' WHERE name='Misc. Expenses (Asset)'`).run();
+  // ---- v0.2: the rest of TallyPrime's features ----
+  add('vouchers', 'mode', "TEXT NOT NULL DEFAULT 'item'"); // item | accounting (Ctrl+H "as voucher")
+  add('vouchers', 'optional', 'INTEGER NOT NULL DEFAULT 0'); // Ctrl+L: kept out of the books until made regular
+  add('vouchers', 'pdc', 'INTEGER NOT NULL DEFAULT 0'); // Ctrl+T post-dated
+  add('vouchers', 'cheque_no', "TEXT NOT NULL DEFAULT ''");
+  add('vouchers', 'cheque_date', 'TEXT DEFAULT NULL');
+  add('vouchers', 'bank_name', "TEXT NOT NULL DEFAULT ''");
+  add('vouchers', 'bank_date', 'TEXT DEFAULT NULL'); // bank reconciliation
+  add('vouchers', 'against_id', 'INTEGER DEFAULT NULL'); // order or delivery/receipt note this voucher follows
+  add('vouchers', 'bounce_of', 'INTEGER DEFAULT NULL'); // a cheque-bounce journal points at its receipt
+  add('vouchers', 'bounced_by', 'INTEGER DEFAULT NULL');
+  add('vouchers', 'charges', 'INTEGER NOT NULL DEFAULT 0'); // freight, discount and other bill lines, net
+  add('inventory', 'godown_id', 'INTEGER DEFAULT NULL'); // NULL = Main Location
+  add('inventory', 'alt_qty', 'REAL DEFAULT NULL'); // quantity as typed in the alternate unit
+  add('inventory', 'base_taxable', 'INTEGER DEFAULT NULL'); // before freight/discount spread over the lines
+  add('items', 'alt_unit_id', 'INTEGER DEFAULT NULL');
+  add('items', 'alt_conv', 'REAL NOT NULL DEFAULT 0'); // base units in one alternate unit, e.g. 24 Pcs in a Case
+  add('ledgers', 'credit_limit', 'INTEGER NOT NULL DEFAULT 0');
+  add('ledgers', 'block_overdue', 'INTEGER NOT NULL DEFAULT 0');
+  add('ledgers', 'price_level', "TEXT NOT NULL DEFAULT ''");
+  add('ledgers', 'assessable', 'INTEGER NOT NULL DEFAULT 0'); // freight etc.: include in the GST taxable value
+  add('ledgers', 'tds_section', "TEXT NOT NULL DEFAULT ''");
+  add('ledgers', 'tds_rate', 'REAL NOT NULL DEFAULT 0');
+  add('company', 'gst_filing', "TEXT NOT NULL DEFAULT 'monthly'"); // monthly | quarterly (QRMP)
+  add('company', 'price_levels', "TEXT NOT NULL DEFAULT ''"); // comma separated, e.g. Wholesale, Retail
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS godowns (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE);
+    INSERT OR IGNORE INTO godowns (id, name) VALUES (1, 'Main Location');
+    CREATE TABLE IF NOT EXISTS tax_lines (
+      id INTEGER PRIMARY KEY, voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE, line_no INTEGER NOT NULL,
+      ledger_id INTEGER NOT NULL REFERENCES ledgers(id), hsn TEXT NOT NULL DEFAULT '', gst_rate REAL NOT NULL DEFAULT 0,
+      taxable INTEGER NOT NULL, cgst INTEGER NOT NULL DEFAULT 0, sgst INTEGER NOT NULL DEFAULT 0, igst INTEGER NOT NULL DEFAULT 0,
+      taxability TEXT NOT NULL DEFAULT 'taxable');
+    CREATE INDEX IF NOT EXISTS tax_lines_voucher ON tax_lines(voucher_id);
+    CREATE TABLE IF NOT EXISTS voucher_charges (
+      id INTEGER PRIMARY KEY, voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE, line_no INTEGER NOT NULL,
+      ledger_id INTEGER NOT NULL REFERENCES ledgers(id), amount INTEGER NOT NULL, assessable INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS voucher_charges_voucher ON voucher_charges(voucher_id);
+    CREATE TABLE IF NOT EXISTS item_gst_rates (
+      id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, from_date TEXT NOT NULL, gst_rate REAL NOT NULL,
+      UNIQUE (item_id, from_date));
+    CREATE TABLE IF NOT EXISTS price_list (
+      item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, level TEXT NOT NULL COLLATE NOCASE, rate INTEGER NOT NULL,
+      PRIMARY KEY (item_id, level));
+    CREATE INDEX IF NOT EXISTS vouchers_against ON vouchers(against_id);
+    DROP VIEW IF EXISTS gst_lines;
+    CREATE VIEW gst_lines AS
+      SELECT iv.voucher_id, iv.line_no, iv.item_id, i.hsn, i.name AS item_name, u.uqc, iv.qty, iv.free_qty, iv.gst_rate,
+        iv.taxable, iv.cgst, iv.sgst, iv.igst, i.taxability
+      FROM inventory iv JOIN items i ON i.id=iv.item_id JOIN units u ON u.id=i.unit_id
+      UNION ALL
+      SELECT t.voucher_id, 1000 + t.line_no, NULL, t.hsn, l.name, 'NA', 0, 0, t.gst_rate, t.taxable, t.cgst, t.sgst, t.igst, t.taxability
+      FROM tax_lines t JOIN ledgers l ON l.id=t.ledger_id WHERE t.taxability<>'outside';
+  `);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_client_key ON vouchers(client_key) WHERE client_key IS NOT NULL`);
   db.exec(`UPDATE vouchers SET party_gstin=COALESCE((SELECT gstin FROM ledgers WHERE id=vouchers.party_id),''),
     party_state=COALESCE(place_of_supply,'') WHERE party_gstin='' AND party_state='' AND party_id IS NOT NULL`);

@@ -1,6 +1,6 @@
 export { formatINR, drCr, toPaise, amountInWords } from '../core/money';
 export { shortDate, parseDate, ddmmyyyy, financialYear, addDays, monthRange, todayISO } from '../core/dates';
-export { isValidGstin, computeInvoice, isIntraState, schemeFreeQty } from '../core/gst';
+export { isValidGstin, computeInvoice, computeBill, rateOn, isIntraState, schemeFreeQty } from '../core/gst';
 
 /** Paise to an editable rupee string without grouping, blank for zero. */
 export function rupeesText(paise: number | null | undefined): string {

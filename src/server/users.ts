@@ -166,6 +166,9 @@ function operatorBlocked(req: FastifyRequest, route: string, books: Books): stri
   if (route === '/api/audit') return 'Only an Owner can see the edit log.';
   if (route === '/api/import/tally') return 'Only an Owner can import data.';
   if (route === '/api/backup') return 'Only an Owner can make a backup.';
+  if (route === '/api/items/gst-rate' || route === '/api/items/:id/prices' || (m !== 'GET' && route.startsWith('/api/godowns/'))) return 'Only an Owner can change rates and godowns.';
+  if (route === '/api/vouchers/:id/bounce' || route === '/api/vouchers/:id/bank-date') return 'Only an Owner can mark cheques and bank dates.';
+  if (['/api/reports/tds', '/api/reports/brs/:ledgerId', '/api/gst/gstr2b'].includes(route)) return 'Only an Owner can see this report.';
   return null;
 }
 

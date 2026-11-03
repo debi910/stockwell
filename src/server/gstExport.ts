@@ -4,6 +4,15 @@ import { isValidGstin } from '../core/gst';
 
 const r2 = (paise: number) => Math.round(paise) / 100;
 
+/** One month (YYYY-MM), or a run of months up to toPeriod (a QRMP quarter). */
+export function periodRange(period: string, toPeriod?: string) {
+  if (!/^\d{4}-\d{2}$/.test(period) || (toPeriod && !/^\d{4}-\d{2}$/.test(toPeriod))) throw new BooksError('Choose a month like 2026-04.');
+  const from = monthRange(period).from;
+  const to = monthRange(toPeriod || period).to;
+  if (to < from) throw new BooksError('The last month is before the first.');
+  return { from, to };
+}
+
 interface InvLine {
   item_id: number; hsn: string; item_name: string; uqc: string; qty: number; free_qty: number; gst_rate: number;
   taxable: number; cgst: number; sgst: number; igst: number; taxability: string;
@@ -16,14 +25,17 @@ interface Inv {
 /** Bills of a period with the party's GSTIN and state as they were on the bill (not as the master is today). */
 function invoices(books: Books, from: string, to: string, types: string[]): Inv[] {
   const vs = books.db.prepare(`
-    SELECT v.id, v.type, v.number, v.seq, v.date, v.total, v.place_of_supply, v.intra, v.cancelled, v.ref_no,
+    SELECT v.id, v.type, v.number, v.seq, v.date, v.total, v.place_of_supply, v.intra, v.cancelled, v.ref_no, v.mode,
       COALESCE(v.party_gstin,'') AS party_gstin, p.name AS party_name
     FROM vouchers v LEFT JOIN ledgers p ON p.id=v.party_id
-    WHERE v.type IN (${types.map(() => '?').join(',')}) AND v.date BETWEEN ? AND ? ORDER BY v.date, v.seq`).all(...types, from, to) as Omit<Inv, 'lines'>[];
+    WHERE v.optional=0 AND v.type IN (${types.map(() => '?').join(',')}) AND v.date BETWEEN ? AND ? ORDER BY v.date, v.seq`).all(...types, from, to) as (Omit<Inv, 'lines'> & { mode: string })[];
+  // Item lines and the ledger lines of bills made "as voucher" (Ctrl+H), alike.
   const lineQ = books.db.prepare(`
-    SELECT iv.item_id, i.hsn, i.name AS item_name, u.uqc, iv.qty, iv.free_qty, iv.gst_rate, iv.taxable, iv.cgst, iv.sgst, iv.igst, i.taxability
-    FROM inventory iv JOIN items i ON i.id=iv.item_id JOIN units u ON u.id=i.unit_id WHERE iv.voucher_id=?`);
-  return vs.map((v) => ({ ...v, place_of_supply: v.place_of_supply || books.company().state_code, lines: lineQ.all(v.id) as InvLine[] }));
+    SELECT item_id, hsn, item_name, uqc, qty, free_qty, gst_rate, taxable, cgst, sgst, igst, taxability
+    FROM gst_lines WHERE voucher_id=? ORDER BY line_no`);
+  return vs.map((v) => ({ ...v, place_of_supply: v.place_of_supply || books.company().state_code, lines: lineQ.all(v.id) as InvLine[] }))
+    // A credit or debit note with no GST in it (a cash discount, interest) is not a GST document.
+    .filter((v) => !(v.mode === 'accounting' && v.type !== 'sales' && !v.lines.length));
 }
 
 function byRate(lines: InvLine[]) {
@@ -51,9 +63,10 @@ function series(number: string) {
  * Covers B2B, B2C large, B2C small, credit notes (registered and unregistered), nil/exempt (Table 8),
  * HSN summary (split B2B/B2C) and documents issued.
  */
-export function gstr1(books: Books, period: string) {
+export function gstr1(books: Books, period: string, opts: { toPeriod?: string; iff?: boolean } = {}) {
   const company = books.company();
-  const { from, to } = monthRange(period);
+  const { from, to } = periodRange(period, opts.toPeriod);
+  const lastMonth = opts.toPeriod || period;
   const all = invoices(books, from, to, ['sales', 'credit_note']);
   const live = all.filter((v) => !v.cancelled);
   const isB2B = (v: Inv) => isValidGstin(v.party_gstin);
@@ -165,10 +178,14 @@ export function gstr1(books: Books, period: string) {
 
   const out: Record<string, unknown> = {
     gstin: company.gstin,
-    fp: `${period.slice(5, 7)}${period.slice(0, 4)}`,
+    fp: `${lastMonth.slice(5, 7)}${lastMonth.slice(0, 4)}`,
     version: 'GST3.2.2',
     hash: 'hash',
   };
+  if (opts.iff) {
+    // QRMP: the Invoice Furnishing Facility in the first two months of a quarter carries B2B invoices and notes only.
+    b2cl.clear(); b2cs.clear(); cdnur.length = 0; nil.clear(); hsnB2B.clear(); hsnB2C.clear(); docDet.length = 0;
+  }
   if (b2bMap.size) out.b2b = [...b2bMap.entries()].map(([ctin, inv]) => ({ ctin, inv }));
   if (b2cl.size) out.b2cl = [...b2cl.entries()].map(([pos, inv]) => ({ pos, inv }));
   const b2csList = [...b2cs.values()].filter((x) => x.txval !== 0);
@@ -223,13 +240,13 @@ export function setOff(liability: Heads, credit: Heads) {
 }
 
 /** Figures to type into GSTR-3B. */
-export function gstr3b(books: Books, period: string) {
-  const { from, to } = monthRange(period);
+export function gstr3b(books: Books, period: string, toPeriod?: string) {
+  const { from, to } = periodRange(period, toPeriod);
   const lines = (types: string[], extra = '') => books.db.prepare(`
-    SELECT v.type, v.intra, v.place_of_supply, COALESCE(v.party_gstin,'') AS party_gstin, iv.gst_rate, i.taxability,
+    SELECT v.type, v.intra, v.place_of_supply, COALESCE(v.party_gstin,'') AS party_gstin, iv.gst_rate, iv.taxability,
       iv.taxable, iv.igst, iv.cgst, iv.sgst
-    FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id JOIN items i ON i.id=iv.item_id
-    WHERE v.cancelled=0 AND v.type IN (${types.map(() => '?').join(',')}) AND v.date BETWEEN ? AND ? ${extra}`).all(...types, from, to) as
+    FROM gst_lines iv JOIN vouchers v ON v.id=iv.voucher_id
+    WHERE v.cancelled=0 AND v.optional=0 AND v.type IN (${types.map(() => '?').join(',')}) AND v.date BETWEEN ? AND ? ${extra}`).all(...types, from, to) as
     { type: string; intra: number; place_of_supply: string; party_gstin: string; gst_rate: number; taxability: string; taxable: number; igst: number; cgst: number; sgst: number }[];
   const zero = () => ({ taxable: 0, igst: 0, cgst: 0, sgst: 0 });
   const add = (acc: ReturnType<typeof zero>, l: { taxable: number; igst: number; cgst: number; sgst: number }, sign: number) => {
@@ -347,5 +364,74 @@ export function ewayCandidates(books: Books, from: string, to: string, includeDo
   return books.db.prepare(`
     SELECT v.id, v.number, v.date, v.total, v.vehicle_no, v.distance_km, v.ewb_no, p.name AS party_name
     FROM vouchers v JOIN ledgers p ON p.id=v.party_id
-    WHERE v.type='sales' AND v.cancelled=0 AND (? OR COALESCE(v.ewb_no,'')='') AND v.date BETWEEN ? AND ? AND v.total>? ORDER BY v.date, v.seq`).all(includeDone ? 1 : 0, from, to, t);
+    WHERE v.type='sales' AND v.cancelled=0 AND v.optional=0 AND (? OR COALESCE(v.ewb_no,'')='') AND v.date BETWEEN ? AND ? AND v.total>? ORDER BY v.date, v.seq`).all(includeDone ? 1 : 0, from, to, t);
+}
+
+/** Invoice numbers as suppliers type them vary ("INV/007" vs "inv-7"): compare letters and numbers only. */
+export function normInvNo(s: string) {
+  return String(s ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ').map((p) => p.replace(/^0+(?=\d)/, '')).join('');
+}
+
+/**
+ * GSTR-2B reconciliation: the 2B JSON downloaded from the GST portal against the purchases in the books.
+ * Bills are matched on supplier GSTIN and invoice number; taxable value and tax must agree within ₹1.
+ */
+export function gstr2bMatch(books: Books, json: unknown, from: string, to: string) {
+  const root = (json as { data?: unknown })?.data ?? json;
+  const doc = (root as { docdata?: Record<string, unknown> })?.docdata;
+  if (!doc || typeof doc !== 'object') throw new BooksError('This is not a GSTR-2B file. Download the JSON from Returns → GSTR-2B on the GST portal.');
+  type Row = { gstin: string; name: string; number: string; date: string; kind: 'invoice' | 'credit' | 'debit'; taxable: number; tax: number; itcAvailable: boolean };
+  const portal: Row[] = [];
+  const toPaise = (n: unknown) => Math.round((Number(n) || 0) * 100);
+  const isoOf = (d: string) => { const m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(String(d ?? '')); return m ? `${m[3]}-${m[2]}-${m[1]}` : ''; };
+  const sumItems = (items: unknown) => {
+    let taxable = 0, tax = 0;
+    for (const it of Array.isArray(items) ? items : []) {
+      const x = it as Record<string, unknown>;
+      taxable += toPaise(x.txval); tax += toPaise(x.igst) + toPaise(x.cgst) + toPaise(x.sgst) + toPaise(x.cess);
+    }
+    return { taxable, tax };
+  };
+  for (const s of (Array.isArray(doc.b2b) ? doc.b2b : []) as Record<string, unknown>[]) {
+    for (const inv of (Array.isArray(s.inv) ? s.inv : []) as Record<string, unknown>[]) {
+      portal.push({ gstin: String(s.ctin ?? ''), name: String(s.trdnm ?? ''), number: String(inv.inum ?? ''), date: isoOf(String(inv.dt)), kind: 'invoice', ...sumItems(inv.items), itcAvailable: inv.itcavl !== 'N' });
+    }
+  }
+  for (const s of (Array.isArray(doc.cdnr) ? doc.cdnr : []) as Record<string, unknown>[]) {
+    for (const nt of (Array.isArray(s.nt) ? s.nt : []) as Record<string, unknown>[]) {
+      portal.push({ gstin: String(s.ctin ?? ''), name: String(s.trdnm ?? ''), number: String(nt.ntnum ?? ''), date: isoOf(String(nt.dt)), kind: nt.typ === 'D' ? 'debit' : 'credit', ...sumItems(nt.items), itcAvailable: nt.itcavl !== 'N' });
+    }
+  }
+  const ours = books.db.prepare(`
+    SELECT v.id, v.number, v.date, v.ref_no, COALESCE(v.party_gstin,'') AS gstin, p.name AS party,
+      v.type, v.taxable, v.cgst + v.sgst + v.igst AS tax
+    FROM vouchers v JOIN ledgers p ON p.id=v.party_id
+    WHERE v.type IN ('purchase','debit_note') AND v.cancelled=0 AND v.optional=0 AND v.date BETWEEN ? AND ? AND COALESCE(v.party_gstin,'')<>''`).all(from, to) as
+    { id: number; number: string; date: string; ref_no: string; gstin: string; party: string; type: string; taxable: number; tax: number }[];
+  const key = (gstin: string, no: string) => `${gstin.toUpperCase()}|${normInvNo(no)}`;
+  const byKey = new Map(ours.map((o) => [key(o.gstin, o.type === 'purchase' ? o.ref_no || o.number : o.ref_no || o.number), o]));
+  const used = new Set<number>();
+  const matched: unknown[] = [];
+  const mismatched: unknown[] = [];
+  const onlyIn2b: Row[] = [];
+  for (const p of portal) {
+    const o = byKey.get(key(p.gstin, p.number));
+    if (!o) { onlyIn2b.push(p); continue; }
+    used.add(o.id);
+    const dTax = p.tax - (p.kind === 'invoice' ? o.tax : o.tax);
+    const dTaxable = p.taxable - o.taxable;
+    const row = { ...p, voucherId: o.id, voucher: o.number, booksTaxable: o.taxable, booksTax: o.tax, diffTaxable: dTaxable, diffTax: dTax };
+    if (Math.abs(dTax) <= 100 && Math.abs(dTaxable) <= 100) matched.push(row); else mismatched.push(row);
+  }
+  const onlyInBooks = ours.filter((o) => !used.has(o.id) && o.tax > 0)
+    .map((o) => ({ voucherId: o.id, voucher: o.number, date: o.date, supplierInvoice: o.ref_no, gstin: o.gstin, party: o.party, taxable: o.taxable, tax: o.tax }));
+  const sum = (rows: { tax: number }[]) => rows.reduce((a, r) => a + r.tax, 0);
+  return {
+    from, to, matched, mismatched, onlyIn2b, onlyInBooks,
+    summary: {
+      portalInvoices: portal.length, matched: matched.length, mismatched: mismatched.length, onlyIn2b: onlyIn2b.length, onlyInBooks: onlyInBooks.length,
+      portalTax: sum(portal), booksTax: sum(ours),
+      notAvailable: portal.filter((p) => !p.itcAvailable).length,
+    },
+  };
 }

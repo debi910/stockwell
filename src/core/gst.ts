@@ -115,3 +115,83 @@ export function schemeFreeQty(qty: number, buy: number | null | undefined, free:
   if (!buy || !free || buy <= 0 || qty < buy) return 0;
   return Math.floor(qty / buy) * free;
 }
+
+export interface ChargeInput {
+  amount: Paise; // + adds to the bill (freight, packing); − reduces it (discount)
+  /** Part of the GST taxable value (Tally: "Include in assessable value"), spread over the items by value. */
+  assessable: boolean;
+}
+
+export interface BillTotals extends InvoiceTotals {
+  /** Share of the assessable charges added to each line's taxable value. */
+  allocated: Paise[];
+  /** Taxable value of each line before the charges were spread. */
+  baseTaxable: Paise[];
+  charges: Paise;
+}
+
+/**
+ * A bill with item lines plus extra ledgers: assessable charges (freight, trade discount) are spread over
+ * the items in proportion to their value and taxed at each item's rate, as Tally does; the others (TCS,
+ * rounding a supplier made) are added after tax. `roundOff` overrides the automatic rounding (to match a
+ * supplier's bill); undefined rounds to the nearest rupee.
+ */
+export function computeBill(lines: LineInput[], intra: boolean, charges: ChargeInput[] = [], roundOff?: Paise | null, roundToRupee = true): BillTotals {
+  const base = lines.map((l) => computeLine(l, intra));
+  const baseTaxable = base.map((t) => t.taxable);
+  const sumBase = baseTaxable.reduce((a, t) => a + t, 0);
+  const assessable = charges.filter((c) => c.assessable).reduce((a, c) => a + c.amount, 0);
+  const after = charges.filter((c) => !c.assessable).reduce((a, c) => a + c.amount, 0);
+  const allocated = baseTaxable.map(() => 0);
+  if (assessable && lines.length) {
+    // Largest remainder: the shares add up exactly to the charge.
+    const weights = sumBase > 0 ? baseTaxable : baseTaxable.map(() => 1);
+    const wsum = weights.reduce((a, w) => a + w, 0);
+    const raw = weights.map((w) => (assessable * w) / wsum);
+    raw.forEach((r, i) => { allocated[i] = Math.trunc(r); });
+    let left = assessable - allocated.reduce((a, x) => a + x, 0);
+    const order = raw.map((r, i) => ({ i, f: Math.abs(r - Math.trunc(r)) })).sort((a, b) => b.f - a.f);
+    for (let k = 0; left !== 0 && k < order.length * 2; k++) {
+      const step = Math.sign(left);
+      allocated[order[k % order.length].i] += step;
+      left -= step;
+    }
+  }
+  const totals = base.map((b, i) => {
+    const taxable = b.taxable + allocated[i];
+    let cgst = 0, sgst = 0, igst = 0;
+    if (intra) {
+      cgst = roundHalfUp((taxable * lines[i].gstRate) / 200);
+      sgst = cgst;
+    } else igst = roundHalfUp((taxable * lines[i].gstRate) / 100);
+    return { ...b, taxable, cgst, sgst, igst, total: taxable + cgst + sgst + igst };
+  });
+  const sum = (k: keyof LineTotals) => totals.reduce((a, t) => a + t[k], 0);
+  const taxable = sum('taxable');
+  const cgst = sum('cgst');
+  const sgst = sum('sgst');
+  const igst = sum('igst');
+  const beforeRound = taxable + cgst + sgst + igst + after;
+  let total: number;
+  if (roundOff !== undefined && roundOff !== null) total = beforeRound + roundOff;
+  else total = roundToRupee ? roundHalfUp(beforeRound / 100) * 100 : beforeRound;
+  const rateMap = new Map<number, { rate: number; taxable: Paise; cgst: Paise; sgst: Paise; igst: Paise }>();
+  lines.forEach((l, i) => {
+    const r = rateMap.get(l.gstRate) ?? { rate: l.gstRate, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+    r.taxable += totals[i].taxable; r.cgst += totals[i].cgst; r.sgst += totals[i].sgst; r.igst += totals[i].igst;
+    rateMap.set(l.gstRate, r);
+  });
+  return {
+    lines: totals, taxable, cgst, sgst, igst, beforeRound, roundOff: total - beforeRound, total,
+    byRate: [...rateMap.values()].sort((a, b) => a.rate - b.rate),
+    allocated, baseTaxable, charges: assessable + after,
+  };
+}
+
+/** The GST rate of an item on a date: the latest rate change on or before it, else the item's own rate. */
+export function rateOn(item: { gst_rate: number; rates?: { from_date: string; gst_rate: number }[] }, date: string): number {
+  let rate = item.gst_rate;
+  let best = '';
+  for (const r of item.rates ?? []) if (r.from_date <= date && r.from_date > best) { best = r.from_date; rate = r.gst_rate; }
+  return rate;
+}

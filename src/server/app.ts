@@ -6,7 +6,7 @@ import path from 'node:path';
 import { openDb } from './db';
 import { Books, BooksError, VOUCHER_TYPES } from './books';
 import * as R from './reports';
-import { gstr1, gstr3b, ewayBillJson, ewayCandidates } from './gstExport';
+import { gstr1, gstr3b, gstr2bMatch, ewayBillJson, ewayCandidates, periodRange } from './gstExport';
 import { billMessage, invoiceHtml, reminderMessage } from './invoice';
 import { fetchTallyMasters, importTallyMasters, parseTallyMasters } from './tally';
 import { installAuth, type Users } from './users';
@@ -44,7 +44,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   app.setErrorHandler((err, _req, reply) => {
     const e = err as Error & { statusCode?: number; code?: string };
-    if (err instanceof BooksError) return reply.status(400).send({ error: err.message });
+    if (err instanceof BooksError) return reply.status(400).send({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     if (e.code === 'SQLITE_CONSTRAINT_UNIQUE') return reply.status(400).send({ error: 'That name is already used.' });
     if (e.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') return reply.status(400).send({ error: 'This is used in other entries, so it cannot be removed or changed this way.' });
     if (e.code === 'SQLITE_BUSY' || e.code === 'SQLITE_LOCKED') return reply.status(503).send({ error: 'The books are busy with another save. Please press Ctrl+A again.' });
@@ -70,7 +70,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return payload;
   });
   app.get('/api/meta', async () => ({
-    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.1.0',
+    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.2.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
   }));
   app.get('/api/company', async () => ({ ...books.company(), fy: financialYear(todayISO()), default_backup_dir: opts.defaultBackupDir ?? '' }));
   app.put('/api/company', async (req) => books.updateCompany(req.body as Record<string, never>));
@@ -99,7 +99,26 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.get('/api/items/:id', async (req) => books.item(Number((req.params as Q).id)));
   app.post('/api/items', async (req) => books.createItem(req.body as never));
   app.put('/api/items/:id', async (req) => books.updateItem(Number((req.params as Q).id), req.body as never));
-  app.get('/api/items/:id/batches', async (req) => books.batches(Number((req.params as Q).id), (req.query as Q).asOf));
+  app.get('/api/items/:id/batches', async (req) => {
+    const q = req.query as Q;
+    return books.batches(Number((req.params as Q).id), q.asOf, 0, q.godownId ? Number(q.godownId) : null);
+  });
+  app.post('/api/items/gst-rate', async (req) => books.changeGstRate(req.body as never));
+  app.delete('/api/items/:id/gst-rate', async (req) => books.removeGstRate(Number((req.params as Q).id), String((req.query as Q).from ?? '')));
+  app.put('/api/items/:id/prices', async (req) => books.setPrices(Number((req.params as Q).id), (req.body ?? {}) as Record<string, unknown>));
+  app.get('/api/godowns', async () => books.godowns());
+  app.post('/api/godowns', async (req) => books.createGodown((req.body as { name?: string } | null)?.name ?? ''));
+  app.put('/api/godowns/:id', async (req) => books.renameGodown(Number((req.params as Q).id), (req.body as { name?: string } | null)?.name ?? ''));
+  /** Alt+S stock query: stock by godown and batch, and the last rates, for one item. */
+  app.get('/api/items/:id/query', async (req) => {
+    const id = Number((req.params as Q).id);
+    const item = books.item(id);
+    const on = (req.query as Q).asOf || todayISO();
+    const godowns = books.godowns().map((g) => ({ ...g, qty: books.stockOf(id, on, 0, g.id) })).filter((g) => g.qty !== 0 || g.id === 1);
+    const lastRate = (type: string) => books.db.prepare(`SELECT v.date, v.number, p.name AS party, iv.rate FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id
+      LEFT JOIN ledgers p ON p.id=v.party_id WHERE iv.item_id=? AND v.type=? AND v.cancelled=0 AND v.optional=0 ORDER BY v.date DESC, v.id DESC LIMIT 5`).all(id, type);
+    return { item, rate: books.rateOn(item, on), stock: books.stockOf(id, on), godowns, batches: books.batches(id, on).filter((b) => b.qty !== 0), purchases: lastRate('purchase'), sales: lastRate('sales') };
+  });
 
   // ----- vouchers -----
   app.get('/api/vouchers', async (req) => {
@@ -115,6 +134,15 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.put('/api/vouchers/:id', async (req) => books.updateVoucher(Number((req.params as Q).id), req.body as never));
   app.delete('/api/vouchers/:id', async (req) => books.deleteVoucher(Number((req.params as Q).id)));
   app.post('/api/vouchers/:id/cancel', async (req) => books.cancelVoucher(Number((req.params as Q).id)));
+  app.post('/api/vouchers/:id/bounce', async (req) => books.bounceCheque(Number((req.params as Q).id), (req.body ?? {}) as never));
+  app.put('/api/vouchers/:id/bank-date', async (req) => books.setBankDate(Number((req.params as Q).id), (req.body as { date?: string } | null)?.date ?? null));
+  /** Ctrl+R / Alt+R: the narration of the last voucher of this type (and party, with Alt+R). */
+  app.get('/api/vouchers/last-narration', async (req) => {
+    const q = req.query as Q;
+    const row = books.db.prepare(`SELECT narration FROM vouchers WHERE type=? AND narration<>'' ${q.partyId ? 'AND party_id=?' : ''} ORDER BY id DESC LIMIT 1`)
+      .get(...[q.type ?? '', ...(q.partyId ? [Number(q.partyId)] : [])]) as { narration: string } | undefined;
+    return { narration: row?.narration ?? '' };
+  });
   app.put('/api/vouchers/:id/ewb', async (req) => {
     const id = Number((req.params as Q).id);
     const ewbNo = String((req.body as { ewbNo?: unknown } | null)?.ewbNo ?? '').trim();
@@ -167,11 +195,33 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   });
   app.get('/api/reports/pending-bills/:ledgerId', async (req) => books.pendingBills({ ledgerId: Number((req.params as Q).ledgerId), asOf: (req.query as Q).asOf || undefined }));
   app.get('/api/reports/alerts', async (req) => R.alerts(books, asOf(req.query as Q)));
+  const range = (q: Q) => {
+    const to = asOf(q);
+    return { from: q.from || maxDate(financialYear(to).start, books.company().books_from), to };
+  };
+  app.get('/api/reports/register', async (req) => { const q = req.query as Q; const r = range(q); return R.register(books, q.type || 'sales', r.from, r.to); });
+  app.get('/api/reports/sales-by', async (req) => { const q = req.query as Q; const r = range(q); return R.salesBy(books, q.by || 'party', r.from, r.to); });
+  app.get('/api/reports/godown-stock', async (req) => R.godownStock(books, asOf(req.query as Q)));
+  app.get('/api/reports/scheme-claims', async (req) => { const r = range(req.query as Q); return R.schemeClaims(books, r.from, r.to); });
+  app.get('/api/reports/brs/:ledgerId', async (req) => R.bankReconciliation(books, Number((req.params as Q).ledgerId), asOf(req.query as Q)));
+  app.get('/api/reports/pdc', async (req) => R.pdcRegister(books, asOf(req.query as Q)));
+  app.get('/api/reports/pending-orders', async (req) => R.pendingOrders(books, (req.query as Q).kind === 'purchase' ? 'purchase' : 'sales'));
+  app.get('/api/reports/tds', async (req) => { const r = range(req.query as Q); return R.tdsRegister(books, r.from, r.to); });
   app.get('/api/reports/reminder/:ledgerId', async (req) => reminderMessage(books, Number((req.params as Q).ledgerId)));
 
   // ----- GST -----
-  app.get('/api/gst/gstr1', async (req) => gstr1(books, (req.query as Q).period || todayISO().slice(0, 7)));
-  app.get('/api/gst/gstr3b', async (req) => gstr3b(books, (req.query as Q).period || todayISO().slice(0, 7)));
+  app.get('/api/gst/gstr1', async (req) => {
+    const q = req.query as Q;
+    return gstr1(books, q.period || todayISO().slice(0, 7), { toPeriod: q.toPeriod || undefined, iff: q.iff === '1' });
+  });
+  app.get('/api/gst/gstr3b', async (req) => { const q = req.query as Q; return gstr3b(books, q.period || todayISO().slice(0, 7), q.toPeriod || undefined); });
+  app.post('/api/gst/gstr2b', { bodyLimit: 20 * 1024 * 1024 }, async (req) => {
+    const b = (req.body ?? {}) as { json?: unknown; period?: string; toPeriod?: string };
+    let data = b.json;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { throw new BooksError('The GSTR-2B file is not valid JSON.'); } }
+    const { from, to } = periodRange(b.period || todayISO().slice(0, 7), b.toPeriod || undefined);
+    return gstr2bMatch(books, data, from, to);
+  });
   app.get('/api/gst/eway-candidates', async (req) => {
     const q = req.query as Q;
     const to = asOf(q);

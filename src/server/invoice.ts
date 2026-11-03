@@ -18,13 +18,16 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
   const c = books.company();
   const party = v.party_id ? books.ledger(v.party_id) : null;
   const lines = v.lines as Record<string, any>[];
-  const title = v.type === 'sales' ? 'TAX INVOICE' : VOUCHER_TYPES[v.type as VoucherType].label.toUpperCase();
+  const taxLines = (v.taxLines ?? []) as Record<string, any>[];
+  const charges = (v.charges ?? []) as Record<string, any>[];
+  const title = (v.optional ? 'OPTIONAL · ' : '') + (v.type === 'sales' ? 'TAX INVOICE' : v.type === 'delivery_note' ? 'DELIVERY CHALLAN' : VOUCHER_TYPES[v.type as VoucherType].label.toUpperCase());
+  const showMrp = lines.some((l) => l.mrp > 0);
   let qr = '';
   if (c.upi_id && v.type === 'sales' && v.total > 0) {
     qr = await QRCode.toDataURL(upiLink(c.upi_id, c.name, v.total, `Bill ${v.number}`), { margin: 1, width: 220 });
   }
   const byRate = new Map<number, { taxable: number; cgst: number; sgst: number; igst: number }>();
-  for (const l of lines) {
+  for (const l of [...lines, ...taxLines]) {
     const r = byRate.get(l.gst_rate) ?? { taxable: 0, cgst: 0, sgst: 0, igst: 0 };
     r.taxable += l.taxable; r.cgst += l.cgst; r.sgst += l.sgst; r.igst += l.igst;
     byRate.set(l.gst_rate, r);
@@ -35,12 +38,15 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
       <td class="c">${i + 1}</td>
       <td>${esc(l.item_name)}${l.batch_no ? `<div class="sub">Batch ${esc(l.batch_no)}${l.expiry_date ? ` · Exp ${esc(shortDate(l.expiry_date))}` : ''}</div>` : ''}</td>
       <td class="c">${esc(l.hsn)}</td>
-      <td class="r">${esc(l.qty)} ${esc(l.unit)}${l.free_qty ? `<div class="sub">+${esc(l.free_qty)} free</div>` : ''}</td>
-      <td class="r">${formatINR(l.rate)}</td>
+      ${showMrp ? `<td class="r">${l.mrp ? formatINR(l.mrp) : ''}</td>` : ''}
+      <td class="r">${l.alt_qty ? `${esc(l.alt_qty)} ${esc(l.alt_unit)}<div class="sub">${esc(l.qty)} ${esc(l.unit)}</div>` : `${esc(l.qty)} ${esc(l.unit)}`}${l.free_qty ? `<div class="sub">+${esc(l.free_qty)} free</div>` : ''}</td>
+      <td class="r">${l.alt_qty ? `${formatINR(Math.round(l.rate * l.alt_conv))}<div class="sub">per ${esc(l.alt_unit)}</div>` : formatINR(l.rate)}</td>
       <td class="r">${l.discount_pct ? esc(l.discount_pct) + '%' : ''}</td>
       <td class="r">${esc(l.gst_rate)}%</td>
       <td class="r">${formatINR(l.taxable)}</td>
-    </tr>`).join('');
+    </tr>`).join('') + taxLines.map((t, i) => `
+    <tr><td class="c">${lines.length + i + 1}</td><td>${esc(t.ledger_name)}</td><td class="c">${esc(t.hsn)}</td>${showMrp ? '<td></td>' : ''}<td></td><td></td><td></td>
+      <td class="r">${esc(t.gst_rate)}%</td><td class="r">${formatINR(t.taxable)}</td></tr>`).join('');
   const taxRows = [...byRate.entries()].sort((a, b) => a[0] - b[0]).map(([rate, t]) => `
     <tr><td class="r">${esc(rate)}%</td><td class="r">${formatINR(t.taxable)}</td>
     ${intra ? `<td class="r">${formatINR(t.cgst)}</td><td class="r">${formatINR(t.sgst)}</td>` : `<td class="r">${formatINR(t.igst)}</td>`}</tr>`).join('');
@@ -92,7 +98,7 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
     </div>
   </div>
   <table>
-    <thead><tr><th>#</th><th style="text-align:left">Item</th><th>HSN</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Disc</th><th class="r">GST</th><th class="r">Taxable</th></tr></thead>
+    <thead><tr><th>#</th><th style="text-align:left">Item</th><th>HSN</th>${showMrp ? '<th class="r">MRP</th>' : ''}<th class="r">Qty</th><th class="r">Rate</th><th class="r">Disc</th><th class="r">GST</th><th class="r">Taxable</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>
   <div class="totals">
@@ -102,8 +108,11 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
       ${c.bank_details ? `<p class="muted">Bank: ${esc(c.bank_details)}</p>` : ''}
     </div>
     <table>
+      ${charges.some((c) => c.assessable) ? `<tr><td>Value of goods</td><td class="r">${formatINR(v.taxable - charges.filter((c) => c.assessable).reduce((a, c) => a + c.amount, 0))}</td></tr>` : ''}
+      ${charges.filter((c) => c.assessable).map((c) => `<tr><td>${esc(c.ledger_name)}</td><td class="r">${formatINR(c.amount)}</td></tr>`).join('')}
       <tr><td>Taxable value</td><td class="r">${formatINR(v.taxable)}</td></tr>
       ${intra ? `<tr><td>CGST</td><td class="r">${formatINR(v.cgst)}</td></tr><tr><td>SGST</td><td class="r">${formatINR(v.sgst)}</td></tr>` : `<tr><td>IGST</td><td class="r">${formatINR(v.igst)}</td></tr>`}
+      ${charges.filter((c) => !c.assessable).map((c) => `<tr><td>${esc(c.ledger_name)}</td><td class="r">${formatINR(c.amount)}</td></tr>`).join('')}
       ${v.round_off ? `<tr><td>Round off</td><td class="r">${formatINR(v.round_off)}</td></tr>` : ''}
       <tr class="grand"><td>Total</td><td class="r">₹${formatINR(v.total)}</td></tr>
       ${outstanding && v.type === 'sales' ? `<tr><td class="muted">Total due from you (all bills)</td><td class="r muted">₹${formatINR(outstanding)}</td></tr>` : ''}
