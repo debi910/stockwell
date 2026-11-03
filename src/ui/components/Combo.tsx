@@ -21,6 +21,8 @@ interface Props {
   /** Enter on an empty field (e.g. to finish the item list). */
   onEmptyEnter?: () => void;
   disabled?: boolean;
+  /** Ctrl+Enter: alter the chosen master (Tally's "alter master on the fly"). */
+  onAlter?: (id: any) => void;
 }
 
 /**
@@ -28,7 +30,7 @@ interface Props {
  * Typing filters, arrows move, Enter picks, Alt+C creates a new master.
  */
 export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
-  { value, options, onChange, title, placeholder, onCreate, autoFocus, name, onEnterDone, onEmptyEnter, disabled },
+  { value, options, onChange, title, placeholder, onCreate, autoFocus, name, onEnterDone, onEmptyEnter, disabled, onAlter },
   ref,
 ) {
   const current = options.find((o) => String(o.id) === String(value ?? ''));
@@ -91,6 +93,12 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
         }}
         onChange={(e) => { setText(e.target.value); setOpen(true); setSel(0); }}
         onKeyDown={(e) => {
+          if (e.ctrlKey && e.key === 'Enter' && onAlter) {
+            e.preventDefault(); e.stopPropagation();
+            const target = open && filtered[sel] ? filtered[sel] : current;
+            if (target) { setOpen(false); onAlter(target.id); }
+            return;
+          }
           if (e.altKey && (e.key === 'c' || e.key === 'C') && onCreate) { e.preventDefault(); e.stopPropagation(); setOpen(false); onCreate(text === current?.label ? '' : text); return; }
           if (!open) {
             if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); if (!text.trim() && onEmptyEnter) onEmptyEnter(); else focusNext(inputRef.current); }
@@ -110,7 +118,7 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
       />
       {open && (
         <div className="picker" ref={listRef} role="listbox" aria-label={title}>
-          <div className="ph"><span>{title}</span>{onCreate && <span>Alt+C Create</span>}</div>
+          <div className="ph"><span>{title}</span><span>{onCreate ? 'Alt+C Create' : ''}{onCreate && onAlter ? ' · ' : ''}{onAlter ? 'Ctrl+Enter Alter' : ''}</span></div>
           {filtered.slice(0, 300).map((o, i) => (
             <div key={o.id} role="option" aria-selected={i === sel} className={`opt ${i === sel ? 'sel' : ''}`} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
               <span>{o.label}</span>{o.meta && <span className="meta">{o.meta}</span>}

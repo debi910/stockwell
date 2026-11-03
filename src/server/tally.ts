@@ -46,18 +46,39 @@ const nameOf = (n: Node) => text(n['@_NAME']) || text(n.NAME) || text(list(n['NA
 const tallyAmount = (v: unknown) => -toPaise(text(v).replace(/[^\d.-]/g, '') || '0');
 const firstNumber = (v: unknown) => Number((text(v).match(/-?[\d.]+/) ?? ['0'])[0]);
 
+/** Tally dates: 20260401, 1-Apr-2026, 01-04-2026 or 2026-04-01 → YYYY-MM-DD (or null). */
+export function tallyDate(v: unknown): string | null {
+  const t = text(v);
+  let m = /^(\d{4})(\d{2})(\d{2})$/.exec(t);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+  if (m) return t;
+  const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  m = /^(\d{1,2})[-/ ]([A-Za-z]{3})[A-Za-z]*[-/ ](\d{2,4})$/.exec(t);
+  if (m && MON.includes(m[2].toLowerCase())) {
+    const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+    return `${y}-${String(MON.indexOf(m[2].toLowerCase()) + 1).padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  }
+  m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/.exec(t);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return null;
+}
+
 export interface TallyMasters {
   groups: { name: string; parent: string }[];
-  ledgers: { name: string; parent: string; opening: number; gstin: string; state: string; address: string; pincode: string; phone: string; creditDays: number }[];
+  ledgers: { name: string; parent: string; opening: number; gstin: string; state: string; address: string; pincode: string; phone: string; creditDays: number;
+    bills: { ref: string; date: string | null; amount: number; creditDays: number }[] }[];
   units: string[];
   stockGroups: string[];
-  items: { name: string; group: string; unit: string; hsn: string; gstRate: number; openingQty: number; openingValue: number }[];
+  godowns: string[];
+  items: { name: string; group: string; unit: string; hsn: string; gstRate: number; openingQty: number; openingValue: number;
+    batches: { name: string; godown: string; expiry: string | null; mfg: string | null; qty: number; value: number }[] }[];
 }
 
 export function parseTallyMasters(xml: string): TallyMasters {
   const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false, trimValues: true });
   const doc = parser.parse(xml);
-  const found: Record<string, Node[]> = { GROUP: [], LEDGER: [], UNIT: [], STOCKGROUP: [], STOCKITEM: [] };
+  const found: Record<string, Node[]> = { GROUP: [], LEDGER: [], UNIT: [], STOCKGROUP: [], STOCKITEM: [], GODOWN: [] };
   const walk = (n: unknown) => {
     if (!n || typeof n !== 'object') return;
     for (const [k, v] of Object.entries(n as Node)) {
@@ -99,6 +120,10 @@ export function parseTallyMasters(xml: string): TallyMasters {
         pincode: text(l.PINCODE) || text(mail.PINCODE),
         phone: text(l.LEDGERMOBILE) || text(l.LEDGERPHONE),
         creditDays: firstNumber(l.BILLCREDITPERIOD),
+        // Each pending bill of the party, so outstandings and overdue days carry over bill by bill.
+        bills: list(l['BILLALLOCATIONS.LIST']).map((b) => ({
+          ref: text(b.NAME), date: tallyDate(b.BILLDATE), amount: tallyAmount(b.OPENINGBALANCE), creditDays: firstNumber(b.BILLCREDITPERIOD),
+        })).filter((b) => b.ref && b.amount),
       };
     }).filter((l) => l.name),
     units: found.UNIT.map(nameOf).filter(Boolean),
@@ -111,7 +136,12 @@ export function parseTallyMasters(xml: string): TallyMasters {
       gstRate: gstRateOf(i),
       openingQty: firstNumber(i.OPENINGBALANCE),
       openingValue: Math.abs(tallyAmount(i.OPENINGVALUE)),
+      batches: list(i['BATCHALLOCATIONS.LIST']).map((b) => ({
+        name: text(b.BATCHNAME) || 'Primary Batch', godown: text(b.GODOWNNAME), expiry: tallyDate(b.EXPIRYPERIOD), mfg: tallyDate(b.MFDON),
+        qty: firstNumber(b.OPENINGBALANCE), value: Math.abs(tallyAmount(b.OPENINGVALUE)),
+      })).filter((b) => b.qty),
     })).filter((i) => i.name),
+    godowns: found.GODOWN.map(nameOf).filter((n) => n && !/^main location$/i.test(n)),
   };
 }
 
@@ -119,7 +149,7 @@ const stateCode = (name: string) => Object.entries(STATES).find(([, n]) => n.toL
 
 /** Adds Tally masters that Stockwell does not have yet. Existing names are left alone. */
 export function importTallyMasters(books: Books, m: TallyMasters) {
-  const result = { groups: 0, ledgers: 0, units: 0, stockGroups: 0, items: 0, skipped: [] as string[] };
+  const result = { groups: 0, ledgers: 0, units: 0, stockGroups: 0, items: 0, bills: 0, batches: 0, godowns: 0, skipped: [] as string[] };
   books.db.transaction(() => {
     const haveGroup = (n: string) => books.db.prepare(`SELECT id FROM groups WHERE name=? COLLATE NOCASE`).get(n) as { id: number } | undefined;
     // Parents first: keep looping until no more groups can be placed.
@@ -146,6 +176,22 @@ export function importTallyMasters(books: Books, m: TallyMasters) {
       result.ledgers++;
     }
 
+    for (const l of m.ledgers) {
+      // Pending bills from Tally replace the single "Opening" bill.
+      const led = books.ledgerByName(l.name);
+      if (!led || !l.bills.length || !books.isBillWise(led.id)) continue;
+      const have = books.db.prepare(`SELECT COUNT(*) n FROM bills WHERE ledger_id=? AND voucher_id IS NULL AND ref<>'Opening'`).get(led.id) as { n: number };
+      if (have.n) continue;
+      books.setOpeningBills(led.id, l.bills.map((b) => ({ ref: b.ref, date: b.date, amount: b.amount, creditDays: b.creditDays || l.creditDays })));
+      result.bills += l.bills.length;
+    }
+
+    for (const g of m.godowns ?? []) {
+      if (books.db.prepare(`SELECT id FROM godowns WHERE name=?`).get(g)) continue;
+      books.createGodown(g);
+      result.godowns++;
+    }
+
     for (const u of m.units) {
       if (books.db.prepare(`SELECT id FROM units WHERE symbol=?`).get(u)) continue;
       books.createUnit({ symbol: u });
@@ -161,10 +207,24 @@ export function importTallyMasters(books: Books, m: TallyMasters) {
       let unit = books.db.prepare(`SELECT id FROM units WHERE symbol=?`).get(i.unit || 'Pcs') as { id: number } | undefined;
       if (!unit) unit = books.createUnit({ symbol: i.unit }) as { id: number };
       const sg = books.db.prepare(`SELECT id FROM stock_groups WHERE name=?`).get(i.group) as { id: number } | undefined;
-      books.createItem({
+      // Batches with names other than Tally's default "Primary Batch" mean the item is tracked by batch.
+      const realBatches = i.batches.filter((b) => b.name !== 'Primary Batch' || b.expiry);
+      const created = books.createItem({
         name: i.name, unit_id: unit.id, stock_group_id: sg?.id ?? null, hsn: i.hsn, gst_rate: i.gstRate,
-        opening_qty: i.openingQty, opening_value: i.openingValue,
+        opening_qty: i.openingQty, opening_value: i.openingValue, track_batch: realBatches.length ? 1 : 0,
+        opening_batch_no: 'Opening',
       });
+      if (realBatches.length) {
+        books.db.prepare(`DELETE FROM batches WHERE item_id=? AND batch_no='Opening'`).run(created.id);
+        let left = i.openingQty;
+        for (const b of realBatches) {
+          books.db.prepare(`INSERT INTO batches (item_id, batch_no, mfg_date, expiry_date, opening_qty) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(item_id, batch_no) DO UPDATE SET opening_qty=opening_qty+excluded.opening_qty`).run(created.id, b.name.slice(0, 40), b.mfg, b.expiry, b.qty);
+          left -= b.qty;
+          result.batches++;
+        }
+        if (Math.abs(left) > 1e-9) books.db.prepare(`INSERT INTO batches (item_id, batch_no, opening_qty) VALUES (?, 'Opening', ?)`).run(created.id, Math.round(left * 1000) / 1000);
+      }
       result.items++;
     }
   })();

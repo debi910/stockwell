@@ -4,7 +4,7 @@ import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
 import { promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
-import { drCr, formatINR, isValidGstin, parseDate, rupeesText, toPaise } from '../format';
+import { drCr, formatINR, isValidGstin, parseDate, rupeesText, shortDate, toPaise } from '../format';
 
 /** Ctrl+A saves; a second press while the first save is still going is ignored, so nothing is saved twice. */
 function useSave(save: () => Promise<void>) {
@@ -28,6 +28,7 @@ export function LedgerForm({ id, name: initialName, groupHint, onSaved }: { id?:
   const [l, setL] = useState<any>({ name: initialName ?? '', group_id: null, opening: 0, credit_days: 0, msme_buyer: 0, msme_supplier: 0 });
   const [openText, setOpenText] = useState('');
   const [openSide, setOpenSide] = useState<'Dr' | 'Cr'>('Dr');
+  const [limitText, setLimitText] = useState('');
   useTitle(id ? 'Ledger Alteration' : 'Ledger Creation');
 
   useEffect(() => {
@@ -39,10 +40,21 @@ export function LedgerForm({ id, name: initialName, groupHint, onSaved }: { id?:
       setL(x);
       setOpenText(rupeesText(Math.abs(x.opening)));
       setOpenSide(x.opening < 0 ? 'Cr' : 'Dr');
+      setLimitText(rupeesText(x.credit_limit));
     });
   }, [id, groupHint]);
 
   const group = groups.find((g) => g.id === l.group_id);
+  /** Names of the group and its parents, to know which questions Tally asks for this ledger. */
+  const path = useMemo(() => {
+    const out: string[] = [];
+    let g = group;
+    while (g) { out.push(g.name); g = groups.find((x) => x.id === g.parent_id); }
+    return out;
+  }, [group, groups]);
+  const isIncomeExpense = path.some((n) => ['Direct Expenses', 'Indirect Expenses', 'Direct Incomes', 'Indirect Incomes', 'Sales Accounts', 'Purchase Accounts'].includes(n));
+  const isDuties = path.includes('Duties & Taxes');
+  const levels: string[] = String(nav.company.price_levels ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   const isParty = useMemo(() => {
     let g = group;
     while (g) {
@@ -57,7 +69,7 @@ export function LedgerForm({ id, name: initialName, groupHint, onSaved }: { id?:
   const save = async () => {
     try {
       const opening = toPaise(openText || 0) * (openSide === 'Cr' ? -1 : 1);
-      const body = { ...l, opening, credit_days: Number(l.credit_days) || 0 };
+      const body = { ...l, opening, credit_days: Number(l.credit_days) || 0, credit_limit: toPaise(limitText || 0), tds_rate: Number(l.tds_rate) || 0 };
       const saved = id ? await api.put(`/api/ledgers/${id}`, body) : await api.post('/api/ledgers', body);
       nav.toast(`Ledger "${saved.name}" saved`);
       onSaved?.(saved);
@@ -82,6 +94,21 @@ export function LedgerForm({ id, name: initialName, groupHint, onSaved }: { id?:
           </div>
         </Row>
         {isParty && <Row label="Credit period (days)"><Text name="Credit days" num value={l.credit_days} onChange={set('credit_days')} /></Row>}
+        {isParty && <Row label="Credit limit (₹, 0 = none)"><Text name="Credit limit" num value={limitText} onChange={setLimitText} /></Row>}
+        {isParty && <Row label="Stop bills if any bill is overdue"><YesNo name="Block overdue" value={!!l.block_overdue} onChange={(v) => set('block_overdue')(v ? 1 : 0)} /></Row>}
+        {isParty && levels.length > 0 && <Row label="Price level">
+          <Select name="Price level" value={l.price_level ?? ''} onChange={set('price_level')} options={[{ value: '', label: 'Not applicable' }, ...levels.map((x) => ({ value: x, label: x }))]} />
+        </Row>}
+        {isIncomeExpense && <Row label="Include in assessable value (GST)"><YesNo name="Assessable" value={!!l.assessable} onChange={(v) => set('assessable')(v ? 1 : 0)} /></Row>}
+        {isIncomeExpense && !!l.assessable && <p className="hint">On a bill this ledger (freight, packing, trade discount) is spread over the items and taxed at their GST rates.</p>}
+        {isDuties && <Row label="Type of duty / tax">
+          <Select name="Type of tax" value={l.tax_kind ?? ''} onChange={set('tax_kind')} disabled={['cgst', 'sgst', 'igst', 'roundoff'].includes(l.tax_kind)}
+            options={['cgst', 'sgst', 'igst', 'roundoff'].includes(l.tax_kind) ? [{ value: l.tax_kind, label: `GST (${String(l.tax_kind).toUpperCase()}), set by Stockwell` }] : [{ value: '', label: 'Others' }, { value: 'tds', label: 'TDS' }, { value: 'tcs', label: 'TCS' }]} />
+        </Row>}
+        {(isIncomeExpense || isParty) && <>
+          <Row label="TDS section (e.g. 194C, 194I)"><Text name="TDS section" upper value={l.tds_section} onChange={set('tds_section')} placeholder="Blank if no TDS" /></Row>
+          {!!l.tds_section && <Row label="TDS rate %"><Text name="TDS rate" num value={l.tds_rate || ''} onChange={set('tds_rate')} /></Row>}
+        </>}
         {isParty && <>
           <div className="section-title">Mailing and GST details</div>
           <Row label="Address" wide><textarea className="f" name="Address" aria-label="Address" rows={2} value={l.address ?? ''} onChange={(e) => set('address')(e.target.value)} /></Row>
@@ -121,6 +148,9 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
   const [it, setIt] = useState<any>({ name: initialName ?? '', gst_rate: 18, track_batch: 0, opening_qty: 0, opening_value: 0 });
   const [money, setMoney] = useState({ mrp: '', sale_rate: '', purchase_rate: '', opening_rate: '' });
   const [batch, setBatch] = useState({ no: '', expiry: '' });
+  const [prices, setPrices] = useState<Record<string, string>>({});
+  const [newRate, setNewRate] = useState({ rate: '', from: '' });
+  const levels: string[] = String(nav.company.price_levels ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   useTitle(id ? 'Stock Item Alteration' : 'Stock Item Creation');
 
   useEffect(() => {
@@ -129,6 +159,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
     if (id) api.get(`/api/items/${id}`).then((x) => {
       setIt(x);
       setMoney({ mrp: rupeesText(x.mrp), sale_rate: rupeesText(x.sale_rate), purchase_rate: rupeesText(x.purchase_rate), opening_rate: x.opening_qty ? rupeesText(Math.round(x.opening_value / x.opening_qty)) : '' });
+      setPrices(Object.fromEntries(Object.entries(x.prices ?? {}).map(([k, v]) => [k, rupeesText(v as number)])));
     });
   }, [id]);
   const set = (k: string) => (v: any) => setIt((x: any) => ({ ...x, [k]: v }));
@@ -143,8 +174,13 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         opening_qty: Number(it.opening_qty) || 0, opening_value: openingValue,
         mrp: toPaise(money.mrp || 0), sale_rate: toPaise(money.sale_rate || 0), purchase_rate: toPaise(money.purchase_rate || 0),
         opening_batch_no: batch.no, opening_expiry: batch.expiry ? parseDate(batch.expiry) ?? batch.expiry : null,
+        alt_unit_id: it.alt_unit_id || null, alt_conv: Number(it.alt_conv) || 0,
       };
+      delete (body as any).rates; delete (body as any).prices;
+      if (newRate.rate !== '' && !parseDate(newRate.from)) { nav.toast('Enter the date the new GST rate applies from, e.g. 1-4-27.', true); return; }
       const saved = id ? await api.put(`/api/items/${id}`, body) : await api.post('/api/items', body);
+      if (levels.length) await api.put(`/api/items/${saved.id}/prices`, Object.fromEntries(levels.map((lv) => [lv, toPaise(prices[lv] || 0)])));
+      if (newRate.rate !== '') await api.post('/api/items/gst-rate', { itemIds: [saved.id], rate: Number(newRate.rate), from: parseDate(newRate.from) });
       nav.toast(`Item "${saved.name}" saved`);
       onSaved?.(saved);
       nav.pop();
@@ -178,9 +214,26 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         <Row label="GST rate %">
           <Select name="GST rate" value={it.gst_rate} onChange={set('gst_rate')} options={nav.meta.gstRates.map((r: number) => ({ value: r, label: `${r}%` }))} />
         </Row>
+        {id && <>
+          {(it.rates ?? []).map((r: any) => <Row key={r.from_date} label={`GST from ${shortDate(r.from_date)}`}><span>{r.gst_rate}%</span></Row>)}
+          <Row label="New GST rate from a date">
+            <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ width: 90 }}><Select name="New GST rate" value={newRate.rate} onChange={(v) => setNewRate((x) => ({ ...x, rate: v }))} options={[{ value: '', label: '—' }, ...nav.meta.gstRates.map((r: number) => ({ value: r, label: `${r}%` }))]} /></div>
+              <Text name="Applicable from" value={newRate.from} onChange={(v) => setNewRate((x) => ({ ...x, from: v }))} placeholder="from date, e.g. 1-4-27" />
+            </div>
+          </Row>
+        </>}
+        <Row label="Alternate unit">
+          <Combo name="Alternate unit" title="List of Units" value={it.alt_unit_id ?? null} onChange={set('alt_unit_id')} placeholder="Not applicable (Enter)"
+            onEmptyEnter={() => set('alt_unit_id')(null)} options={[{ id: '', label: 'Not applicable' }, ...units.filter((u) => u.id !== it.unit_id).map((u) => ({ id: u.id, label: u.symbol, meta: u.name }))]} />
+        </Row>
+        {!!it.alt_unit_id && <Row label={`${units.find((u) => u.id === it.unit_id)?.symbol ?? 'Units'} in 1 ${units.find((u) => u.id === it.alt_unit_id)?.symbol ?? ''}`}>
+          <Text name="Conversion" num value={it.alt_conv || ''} onChange={set('alt_conv')} placeholder="e.g. 24" />
+        </Row>}
         <Row label="MRP"><Text name="MRP" num value={money.mrp} onChange={m('mrp')} /></Row>
         <Row label="Selling rate (before GST)"><Text name="Selling rate" num value={money.sale_rate} onChange={m('sale_rate')} /></Row>
         <Row label="Purchase rate (before GST)"><Text name="Purchase rate" num value={money.purchase_rate} onChange={m('purchase_rate')} /></Row>
+        {levels.map((lv) => <Row key={lv} label={`${lv} rate`}><Text name={`${lv} rate`} num value={prices[lv] ?? ''} onChange={(v) => setPrices((p) => ({ ...p, [lv]: v }))} /></Row>)}
         <Row label="Track batches & expiry"><YesNo name="Track batches" value={!!it.track_batch} onChange={(v) => set('track_batch')(v ? 1 : 0)} /></Row>
         <Row label="Reorder level"><Text name="Reorder level" num value={it.reorder_level} onChange={set('reorder_level')} /></Row>
         <div className="section-title">Scheme (buy X get Y free)</div>

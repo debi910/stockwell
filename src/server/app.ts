@@ -96,7 +96,15 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const stock = new Map(R.stockSummary(books, todayISO()).map((s) => [s.id, s.closing_qty]));
     return (books.items() as { id: number }[]).map((i) => ({ ...i, stock: stock.get(i.id) ?? 0 }));
   });
-  app.get('/api/items/:id', async (req) => books.item(Number((req.params as Q).id)));
+  app.get('/api/items/:id', async (req) => {
+    const id = Number((req.params as Q).id);
+    const item = books.item(id);
+    return {
+      ...item,
+      rates: books.db.prepare(`SELECT from_date, gst_rate FROM item_gst_rates WHERE item_id=? ORDER BY from_date`).all(id),
+      prices: Object.fromEntries((books.db.prepare(`SELECT level, rate FROM price_list WHERE item_id=?`).all(id) as { level: string; rate: number }[]).map((p) => [p.level, p.rate])),
+    };
+  });
   app.post('/api/items', async (req) => books.createItem(req.body as never));
   app.put('/api/items/:id', async (req) => books.updateItem(Number((req.params as Q).id), req.body as never));
   app.get('/api/items/:id/batches', async (req) => {
@@ -136,6 +144,20 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.post('/api/vouchers/:id/cancel', async (req) => books.cancelVoucher(Number((req.params as Q).id)));
   app.post('/api/vouchers/:id/bounce', async (req) => books.bounceCheque(Number((req.params as Q).id), (req.body ?? {}) as never));
   app.put('/api/vouchers/:id/bank-date', async (req) => books.setBankDate(Number((req.params as Q).id), (req.body as { date?: string } | null)?.date ?? null));
+  /** Page Up / Page Down in a voucher: the previous or next voucher of the same type. */
+  app.get('/api/vouchers/:id/neighbour', async (req) => {
+    const id = Number((req.params as Q).id);
+    const q = req.query as Q;
+    const next = q.dir === 'next';
+    if (!id) {
+      const last = books.db.prepare(`SELECT id, type FROM vouchers WHERE type=? ORDER BY date DESC, id DESC LIMIT 1`).get(q.type ?? '');
+      return last ?? null;
+    }
+    const v = books.db.prepare(`SELECT id, type, date FROM vouchers WHERE id=?`).get(id) as { id: number; type: string; date: string } | undefined;
+    if (!v) throw new BooksError('Voucher not found.');
+    return books.db.prepare(`SELECT id, type FROM vouchers WHERE type=? AND ${next ? '(date>? OR (date=? AND id>?))' : '(date<? OR (date=? AND id<?))'}
+      ORDER BY date ${next ? 'ASC' : 'DESC'}, id ${next ? 'ASC' : 'DESC'} LIMIT 1`).get(v.type, v.date, v.date, v.id) ?? null;
+  });
   /** Ctrl+R / Alt+R: the narration of the last voucher of this type (and party, with Alt+R). */
   app.get('/api/vouchers/last-narration', async (req) => {
     const q = req.query as Q;

@@ -94,6 +94,7 @@ export function CreateMenu() {
         { label: 'Stock Item', hot: 'I', run: go('item-form') },
         { label: 'Stock Group (Company / Brand)', hot: 'S', run: go('stock-group-form') },
         { label: 'Unit', run: go('unit-form') },
+        { label: 'Godown', hot: 'D', run: go('godowns') },
       ]} />
     </div>
   );
@@ -109,6 +110,8 @@ export function AlterMenu() {
         { label: 'Ledger', run: go('ledger') },
         { section: 'Inventory masters' },
         { label: 'Stock Item', hot: 'I', run: go('item') },
+        { label: 'GST rate of many items', hot: 'G', run: () => nav.push({ name: 'gst-rate' }) },
+        { label: 'Godowns', hot: 'D', run: () => nav.push({ name: 'godowns' }) },
       ]} />
     </div>
   );
@@ -127,11 +130,20 @@ export function ReportsMenu() {
         { label: 'Ledger', hot: 'L', run: go('master-list', { kind: 'ledger', mode: 'report' }) },
         { label: 'Receivables (Outstandings)', hot: 'R', run: go('outstanding', { kind: 'receivable' }) },
         { label: 'Payables (Outstandings)', hot: 'P', run: go('outstanding', { kind: 'payable' }) },
+        { label: 'Sales Register', hot: 'N', run: go('register', { type: 'sales' }) },
+        { label: 'Purchase Register', hot: 'U', run: go('register', { type: 'purchase' }) },
+        { label: 'Sales by Beat / Salesman / Party', hot: 'B', run: go('sales-analysis') },
+        { label: 'Post-dated Cheques', hot: 'Q', run: go('pdc') },
+        ...(owner ? [{ label: 'Bank Reconciliation', hot: 'K', run: go('bank-reco') }] : []),
         { section: 'Inventory' },
         { label: 'Stock Summary', hot: 'S', run: go('stock-summary') },
+        { label: 'Godown Summary', hot: 'W', run: go('godown-stock') },
         { label: 'Expiry & Alerts', hot: 'E', run: go('alerts') },
+        { label: 'Scheme Claims (free goods)', hot: 'C', run: go('scheme-claims') },
+        { label: 'Orders and Notes Pending', hot: 'O', run: go('pending-orders', { kind: 'sales' }) },
         { section: 'Statutory' },
         { label: 'GST Returns & e-Way Bills', hot: 'G', run: go('gst') },
+        ...(owner ? [{ label: 'GSTR-2B Reconciliation', hot: '2', run: go('gstr2b') }, { label: 'TDS Register', hot: 'T', run: go('tds') }] : []),
         ...(owner ? [{ label: 'Edit Log (Audit trail)', hot: 'A', run: go('audit') }] : []),
       ]} />
     </div>

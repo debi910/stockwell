@@ -30,11 +30,11 @@ export function Text({ value, onChange, name, autoFocus, placeholder, num, upper
   );
 }
 
-export function Select({ value, onChange, options, name }: {
-  value: string | number; onChange: (v: string) => void; options: { value: string | number; label: string }[]; name?: string;
+export function Select({ value, onChange, options, name, disabled }: {
+  value: string | number; onChange: (v: string) => void; options: { value: string | number; label: string }[]; name?: string; disabled?: boolean;
 }) {
   return (
-    <select className="f" name={name} aria-label={name} value={value} onChange={(e) => onChange(e.target.value)} onKeyDown={enterNext}>
+    <select className="f" name={name} aria-label={name} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} onKeyDown={enterNext}>
       {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
   );

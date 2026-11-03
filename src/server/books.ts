@@ -200,6 +200,9 @@ export class Books {
     for (const k of ['ewb_threshold', 'expiry_alert_days'] as const) {
       if (patch[k] !== undefined && !(Number(patch[k]) >= 0)) fail('Amounts and days in settings cannot be negative.');
     }
+    if (patch.gst_filing !== undefined && !['monthly', 'quarterly'].includes(String(patch.gst_filing))) fail('GST filing must be monthly or quarterly.');
+    if (patch.price_levels !== undefined) patch.price_levels = String(patch.price_levels ?? '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 10).join(', ');
+    if (patch.allow_negative_stock !== undefined) patch.allow_negative_stock = patch.allow_negative_stock ? 1 : 0;
     if (patch.msme_interest_rate !== undefined && !(Number(patch.msme_interest_rate) >= 0 && Number(patch.msme_interest_rate) <= 100)) fail('Enter the MSME interest rate as a yearly percentage, e.g. 16.5.');
     this.db.prepare(`UPDATE company SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE id=1`).run(patch);
     if (patch.books_from !== undefined && patch.books_from !== before.books_from) {
@@ -322,6 +325,7 @@ export class Books {
 
   updateLedger(id: number, patch: Partial<Ledger>) {
     const before = this.ledger(id);
+    if (['cgst', 'sgst', 'igst', 'roundoff'].includes(before.tax_kind ?? '')) { patch = { ...patch }; delete patch.tax_kind; }
     const l = this.cleanLedger(patch);
     if (l.name && l.name.toLowerCase() !== before.name.toLowerCase() && this.ledgerByName(l.name)) fail(`A ledger named "${l.name}" already exists.`);
     const keys = Object.keys(l).filter((k) => (LEDGER_COLS as readonly string[]).includes(k) && !(k === 'tax_kind' && ['cgst', 'sgst', 'igst', 'roundoff'].includes(before.tax_kind ?? '')));
@@ -354,15 +358,34 @@ export class Books {
     })();
   }
 
-  /** Opening balance of a party is kept as one bill named "Opening" so it shows in outstandings. */
+  /** Opening balance of a party shows in outstandings: as the pending bills brought from Tally, and whatever
+   *  part of the balance they do not cover as one bill named "Opening". */
   private syncOpeningBill(ledgerId: number) {
     this.db.prepare(`DELETE FROM bills WHERE ledger_id=? AND voucher_id IS NULL AND ref='Opening'`).run(ledgerId);
     const l = this.ledger(ledgerId);
-    if (l.opening && this.isBillWise(ledgerId)) {
+    if (!this.isBillWise(ledgerId)) return;
+    const listed = (this.db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM bills WHERE ledger_id=? AND voucher_id IS NULL`).get(ledgerId) as { s: number }).s;
+    const rest = l.opening - listed;
+    if (rest) {
       const from = this.company().books_from;
       this.db.prepare(`INSERT INTO bills (voucher_id, ledger_id, ref, kind, amount, date, due_date) VALUES (NULL, ?, 'Opening', 'new', ?, ?, ?)`)
-        .run(ledgerId, l.opening, addDays(from, -1), addDays(from, -1));
+        .run(ledgerId, rest, addDays(from, -1), addDays(from, -1));
     }
+  }
+
+  /** Pending bills carried in from the old books (Tally's bill-wise opening). */
+  setOpeningBills(ledgerId: number, bills: { ref: string; date: string | null; amount: number; creditDays?: number }[]) {
+    const from = this.company().books_from;
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM bills WHERE ledger_id=? AND voucher_id IS NULL`).run(ledgerId);
+      for (const b of bills) {
+        const date = b.date && b.date < from ? b.date : addDays(from, -1);
+        this.db.prepare(`INSERT INTO bills (voucher_id, ledger_id, ref, kind, amount, date, due_date) VALUES (NULL, ?, ?, 'new', ?, ?, ?)`)
+          .run(ledgerId, String(b.ref).slice(0, 40), Math.round(b.amount), date, addDays(date, b.creditDays || 0));
+      }
+      this.syncOpeningBill(ledgerId);
+      this.audit('ledger', ledgerId, 'opening-bills', bills);
+    })();
   }
 
   // ---------- inventory masters ----------
@@ -1225,9 +1248,9 @@ export class Books {
     const insI = this.db.prepare(`INSERT INTO inventory (voucher_id, line_no, item_id, batch_id, qty, free_qty, rate, discount_pct, gst_rate, taxable, cgst, sgst, igst, direction, godown_id, alt_qty, base_taxable)
       VALUES (@voucher_id, @line_no, @item_id, @batch_id, @qty, @free_qty, @rate, @discount_pct, @gst_rate, @taxable, @cgst, @sgst, @igst, @direction, @godown_id, @alt_qty, @base_taxable)`);
     for (const l of invLines) insI.run({ godown_id: null, alt_qty: null, base_taxable: null, ...l, voucher_id: id });
-    const insT = this.db.prepare(`INSERT INTO tax_lines (voucher_id, line_no, ledger_id, hsn, gst_rate, taxable, cgst, sgst, igst, taxability)
-      VALUES (@voucher_id, @line_no, @ledger_id, @hsn, @gst_rate, @taxable, @cgst, @sgst, @igst, @taxability)`);
-    for (const t of taxRows) { const { base: _b, ...rest } = t; insT.run({ ...rest, voucher_id: id }); }
+    const insT = this.db.prepare(`INSERT INTO tax_lines (voucher_id, line_no, ledger_id, hsn, gst_rate, taxable, cgst, sgst, igst, taxability, base)
+      VALUES (@voucher_id, @line_no, @ledger_id, @hsn, @gst_rate, @taxable, @cgst, @sgst, @igst, @taxability, @base)`);
+    for (const t of taxRows) insT.run({ ...t, voucher_id: id });
     const insC = this.db.prepare(`INSERT INTO voucher_charges (voucher_id, line_no, ledger_id, amount, assessable) VALUES (@voucher_id, @line_no, @ledger_id, @amount, @assessable)`);
     for (const c of chargeRows) insC.run({ ...c, voucher_id: id });
     const insB = this.db.prepare(`INSERT INTO bills (voucher_id, ledger_id, ref, kind, amount, date, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)`);

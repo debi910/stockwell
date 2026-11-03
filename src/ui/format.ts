@@ -13,6 +13,7 @@ export const VOUCHER_LABEL: Record<string, string> = {
   receipt: 'Receipt', payment: 'Payment', contra: 'Contra', journal: 'Journal',
   sales_order: 'Sales Order', purchase_order: 'Purchase Order', rejection_in: 'Rejection In', rejection_out: 'Rejection Out',
   stock_journal: 'Stock Journal', physical_stock: 'Physical Stock',
+  delivery_note: 'Delivery Note', receipt_note: 'Receipt Note', memorandum: 'Memorandum', reversing_journal: 'Reversing Journal',
 };
 
 /** Moves focus to the next input in the form, like pressing Enter through Tally fields. */

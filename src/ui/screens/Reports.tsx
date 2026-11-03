@@ -5,7 +5,7 @@ import { confirmBox } from '../components/Dialog';
 import { VOUCHER_LABEL, drCr, financialYear, formatINR, parseDate, shortDate } from '../format';
 
 /** Arrow keys move through rows; Enter opens the selected one. */
-function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolean) {
+export function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolean) {
   const [sel, setSel] = useState(0);
   useScreenKeys((e) => {
     if (e.key === 'Escape' && onEsc?.()) return true; // close a pop-up first, not the report
@@ -24,7 +24,7 @@ function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolean) {
 }
 
 /** A "From – To" period picker (F2 in Tally) shown in the report toolbar. */
-function Period({ from, to, onChange, single }: { from?: string; to: string; onChange: (from: string, to: string) => void; single?: boolean }) {
+export function Period({ from, to, onChange, single }: { from?: string; to: string; onChange: (from: string, to: string) => void; single?: boolean }) {
   const [f, setF] = useState(from ? shortDate(from) : '');
   const [t, setT] = useState(shortDate(to));
   const apply = () => {

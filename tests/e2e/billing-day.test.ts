@@ -190,6 +190,70 @@ describe('a billing day', () => {
     await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
   });
 
+  it('sends goods on a Delivery Note (Alt+F8) and bills them against it without moving stock twice', async () => {
+    const closing = async () => (await (await fetch(`${base}/api/reports/stock-summary?asOf=${todayISO()}`)).json()).find((s: any) => s.name === 'Patanjali Cow Ghee 1L').closing_qty;
+    const before = await closing();
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('Alt+F8');
+    await page.getByText('Delivery Note Voucher Creation').first().waitFor();
+    await pick('Party', 'Ramesh');
+    await pick('Item 1', 'Ghee');
+    await type('Quantity 1', '3');
+    await page.keyboard.press('Control+a');
+    await page.getByText(/Delivery Note DL\/.* saved/).first().waitFor();
+    await page.keyboard.press('Escape');
+    expect(await closing()).toBe(before - 3);
+
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('F8');
+    await pick('Party', 'Ramesh');
+    await pick('Against order', 'DL');
+    await page.getByText(/Lines copied from Delivery Note/).first().waitFor();
+    expect(await field('Quantity 1').inputValue()).toBe('3');
+    await page.keyboard.press('Control+a');
+    await page.getByText(/Sales S\/.* saved · ₹2,124/).first().waitFor();
+    await snap('11-after-against');
+    await page.keyboard.press('Escape');
+    await snap('12-after-esc');
+    expect(await closing()).toBe(before - 3);
+  });
+
+  it('adds freight below the items as an extra ledger', async () => {
+    const groups = await (await fetch(base + '/api/groups')).json();
+    const gid = groups.find((g: any) => g.name === 'Indirect Incomes').id;
+    const r = await fetch(base + '/api/ledgers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Freight Charges', group_id: gid }) });
+    expect(r.ok).toBe(true);
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('F8');
+    await pick('Party', 'Ramesh');
+    await pick('Item 1', 'Ghee');
+    await type('Quantity 1', '1');
+    await field('Extra ledger 1').waitFor();
+    await pick('Extra ledger 1', 'Freight');
+    await field('Extra amount 1').fill('50');
+    await page.keyboard.press('Control+a');
+    await page.getByText(/Sales S\/.* saved · ₹758/).first().waitFor();
+    await page.keyboard.press('Escape');
+    const book = await (await fetch(`${base}/api/reports/day-book?from=${todayISO()}&to=${todayISO()}`)).json();
+    const last = book.filter((v: any) => v.type === 'sales').sort((a: any, b: any) => b.id - a.id)[0];
+    const v = await (await fetch(`${base}/api/vouchers/${last.id}`)).json();
+    expect(v.charges.length).toBe(1);
+    expect(v.charges[0].amount).toBe(5000);
+  });
+
+  it('opens the calculator with Ctrl+N and features with F11', async () => {
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+    await page.keyboard.press('Control+n');
+    await field('Calculation').fill('1250*12 + 100');
+    await page.getByText('= 15,100').waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByTestId('calculator').waitFor({ state: 'detached' });
+    await page.keyboard.press('F11');
+    await page.getByText('Company Features').first().waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByRole('menu', { name: 'Gateway of Stockwell' }).waitFor();
+  });
+
   it('turns on logins and keeps the operator out of profit reports', async () => {
     await page.keyboard.press('F3');
     await page.getByRole('button', { name: 'Users and passwords' }).click();

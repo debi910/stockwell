@@ -11,9 +11,11 @@ const GROUPS: { section: string; types: [string, string, string][] }[] = [
   ] },
   { section: 'Inventory Vouchers', types: [
     ['stock_journal', 'Stock Journal', 'Alt+F7'], ['physical_stock', 'Physical Stock', 'Ctrl+F7'],
+    ['delivery_note', 'Delivery Note', 'Alt+F8'], ['receipt_note', 'Receipt Note', 'Alt+F9'],
     ['rejection_in', 'Rejection In', 'Ctrl+F6'], ['rejection_out', 'Rejection Out', 'Ctrl+F5'],
   ] },
   { section: 'Order Vouchers', types: [['sales_order', 'Sales Order', 'Ctrl+F8'], ['purchase_order', 'Purchase Order', 'Ctrl+F9']] },
+  { section: 'Other Vouchers', types: [['memorandum', 'Memorandum', ''], ['reversing_journal', 'Reversing Journal', '']] },
 ];
 
 export function VoucherTypesMenu() {
@@ -23,7 +25,7 @@ export function VoucherTypesMenu() {
     <div style={{ padding: 24 }}>
       <Menu title="Change Voucher Type" entries={GROUPS.flatMap((g) => [
         { section: g.section },
-        ...g.types.map(([t, label, key]) => ({ label: `${label}   ${key}`, run: open(t) })),
+        ...g.types.map(([t, label, key]) => ({ label: key ? `${label}   ${key}` : label, run: open(t) })),
       ])} />
     </div>
   );
@@ -53,6 +55,24 @@ const DESTS: Dest[] = [
   { label: 'Alerts & Reminders (overdue, MSME, expiry)', group: 'Report', open: screen('alerts') },
   { label: 'GST Returns (GSTR-1, GSTR-3B) & e-Way Bills', group: 'Report', open: screen('gst') },
   { label: 'Edit Log (Audit trail)', group: 'Report', open: screen('audit'), owner: true },
+  { label: 'Sales Register', group: 'Report', open: screen('register', { type: 'sales' }) },
+  { label: 'Purchase Register', group: 'Report', open: screen('register', { type: 'purchase' }) },
+  { label: 'Credit Note Register', group: 'Report', open: screen('register', { type: 'credit_note' }) },
+  { label: 'Debit Note Register', group: 'Report', open: screen('register', { type: 'debit_note' }) },
+  { label: 'Receipt Register', group: 'Report', open: screen('register', { type: 'receipt' }) },
+  { label: 'Payment Register', group: 'Report', open: screen('register', { type: 'payment' }) },
+  { label: 'Sales by Beat / Salesman / Party / Item', group: 'Report', open: screen('sales-analysis') },
+  { label: 'Godown Summary', group: 'Report', open: screen('godown-stock') },
+  { label: 'Scheme Claims (free goods)', group: 'Report', open: screen('scheme-claims') },
+  { label: 'Bank Reconciliation', group: 'Report', open: screen('bank-reco'), owner: true },
+  { label: 'Post-dated Cheques', group: 'Report', open: screen('pdc') },
+  { label: 'Sales Orders / Delivery Notes Pending', group: 'Report', open: screen('pending-orders', { kind: 'sales' }) },
+  { label: 'Purchase Orders / Receipt Notes Pending', group: 'Report', open: screen('pending-orders', { kind: 'purchase' }) },
+  { label: 'TDS Register', group: 'Report', open: screen('tds'), owner: true },
+  { label: 'GSTR-2B Reconciliation', group: 'Report', open: screen('gstr2b'), owner: true },
+  { label: 'Godowns', group: 'Create Master', open: screen('godowns') },
+  { label: 'Change GST Rate (many items)', group: 'Alter Master', open: screen('gst-rate'), owner: true },
+  { label: 'Company Features (F11)', group: 'Company', open: screen('features'), owner: true },
   { label: 'Company Settings', group: 'Company', open: screen('company'), owner: true },
   { label: 'Users and Passwords', group: 'Company', open: screen('users'), owner: true },
   { label: 'Backup / Restore', group: 'Data', open: screen('backup') },

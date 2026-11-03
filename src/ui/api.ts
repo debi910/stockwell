@@ -1,7 +1,7 @@
 // Talks to the Stockwell server (on this PC or on the main office PC).
 
 export class ApiError extends Error {
-  constructor(message: string, public status = 0) { super(message); }
+  constructor(message: string, public status = 0, public code?: string) { super(message); }
 }
 
 // The login token lives only as long as this window, like logging in to Tally each time it opens.
@@ -45,8 +45,19 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
   if (res.status === 401) onLoggedOut();
-  if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status);
+  if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status, data?.code);
   return data as T;
+}
+
+/** Saves text as a file: a Save dialog on the desktop app, a download in a browser. */
+export function downloadText(fileName: string, text: string, type = 'text/csv') {
+  const blob = new Blob([type === 'text/csv' ? '\ufeff' + text : text], { type: `${type};charset=utf-8` });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
 export const api = {

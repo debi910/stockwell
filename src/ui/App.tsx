@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
-import { api, setToken, whenLoggedOut } from './api';
+import { api, downloadText, saveTextFile, desktop, setToken, whenLoggedOut } from './api';
 import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName } from './nav';
 import { VOUCHER_LABEL, parseDate, shortDate, todayISO } from './format';
 import { TYPE_KEYS } from './screens/Voucher';
@@ -56,6 +56,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   const [titles, setTitles] = useState<Record<number, string>>({});
   const [screenKeys, setScreenKeysState] = useState<Record<number, KeyAction[]>>({});
   const [askDate, setAskDate] = useState(false);
+  const [calc, setCalc] = useState(false);
   const [conn, setConn] = useState<string>('');
   const handlers = useRef<Record<number, ((e: KeyboardEvent) => boolean | void) | null>>({});
 
@@ -106,8 +107,9 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     { key: 'F10', label: 'Other Vouchers', run: () => navRef.current.push({ name: 'voucher-types' }) },
     // TallyPrime's other voucher keys work everywhere but are not listed, as in Tally's button bar.
     ...Object.entries(TYPE_KEYS).filter(([k]) => !/^F\d$/.test(k)).map(([key, type]) => ({ key, label: VOUCHER_LABEL[type], run: () => openVoucher(type), hidden: true })),
-    { key: 'Alt+F8', label: 'Delivery Note', hidden: true, run: () => toast.info('Delivery Note is not in Stockwell yet. Make the Sales bill (F8) directly.') },
-    { key: 'Alt+F9', label: 'Receipt Note', hidden: true, run: () => toast.info('Receipt Note is not in Stockwell yet. Enter the Purchase (F9) directly.') },
+    { key: 'F11', label: 'Features', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company features.') : navRef.current.push({ name: 'features' })) },
+    { key: 'Ctrl+E', label: 'Export', hidden: true, run: () => exportVisibleTable(titles[stack.length - 1] ?? screenTitle(stack[stack.length - 1])) },
+    { key: 'Ctrl+N', label: 'Calculator', hidden: true, run: () => setCalc(true) },
     { key: 'Alt+G', label: 'Go To', run: () => navRef.current.push({ name: 'goto' }) },
     { key: 'Ctrl+G', label: 'Go To', hidden: true, run: () => navRef.current.push({ name: 'goto' }) },
     // Ctrl+Q leaves a screen, and on the Gateway quits (logs out), as in TallyPrime.
@@ -121,7 +123,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (askDate) return;
+      if (askDate || calc) return;
       const name = keyName(e);
       const h = handlers.current[stack.length - 1];
       if (h && h(e)) { e.preventDefault(); return; }
@@ -180,10 +182,11 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
           {conn ? (
             <button className="linkish" title="Change which PC keeps the books"
               onClick={async () => { if (await confirmBox('Change this PC\'s setup (main PC, or connect to another PC)?\nStockwell will restart.')) window.stockwell?.resetConnection(); }}>{conn}</button>
-          ) : <span>Stockwell 0.1</span>}
+          ) : <span>Stockwell {meta.version ?? '0.2'}</span>}
           <span>Enter: next field · Ctrl+A: save · Alt+C: create · Esc: back</span>
         </footer>
       </div>
+      {calc && <Calculator onClose={() => setCalc(false)} />}
       {askDate && <DatePrompt current={workDate} onDone={(d) => { if (d) setWorkDate(d); setAskDate(false); }} />}
     </NavContext.Provider>
   );
@@ -209,6 +212,89 @@ function DatePrompt({ current, onDone }: { current: string; onDone: (d: string |
           }}
         />
         <div className="hint">{err || 'New vouchers will use this date. Type 5 for the 5th of this month.'}</div>
+      </div>
+    </div>
+  );
+}
+
+/** Ctrl+E: saves the table on the open screen as a CSV file that opens in Excel. */
+function exportVisibleTable(title: string) {
+  const table = Array.from(document.querySelectorAll<HTMLTableElement>('.main table')).find((t) => t.offsetParent !== null);
+  if (!table) { toast.info('There is no table on this screen to export.'); return; }
+  const cell = (c: Element) => {
+    const input = c.querySelector('input, select') as HTMLInputElement | null;
+    const v = (input ? input.value : (c as HTMLElement).innerText).replace(/\s+/g, ' ').trim();
+    return /[",\n]/.test(v) || /^[=+\-@]/.test(v) && !/^-?[\d,.]+$/.test(v) ? `"${v.replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"` : v;
+  };
+  const rows = Array.from(table.rows).map((r) => Array.from(r.cells).map(cell).join(','));
+  const name = `${title.replace(/[^\w\- ]+/g, '').trim() || 'Stockwell'} ${todayISO()}.csv`;
+  const text = rows.join('\r\n');
+  if (desktop) saveTextFile(name, '\ufeff' + text).then((p) => { if (p) toast.success(`Saved ${p}`); }).catch((e) => toast.error(e.message));
+  else { downloadText(name, text); toast.success(`Exported ${name}`); }
+}
+
+/** Evaluates + - * / % and brackets on plain numbers, without eval. Returns null for anything else. */
+export function calculate(expr: string): number | null {
+  const src = expr.replace(/,/g, '').replace(/\s+/g, '').replace(/x/gi, '*');
+  if (!src || !/^[\d.+\-*/%()]+$/.test(src)) return null;
+  let i = 0;
+  const peek = () => src[i];
+  const num = (): number | null => {
+    if (peek() === '(') { i++; const v = sum(); if (peek() !== ')') return null; i++; return v; }
+    if (peek() === '-') { i++; const v = num(); return v === null ? null : -v; }
+    if (peek() === '+') { i++; return num(); }
+    const m = /^\d*\.?\d+|^\d+\.?/.exec(src.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    let v = Number(m[0]);
+    if (peek() === '%') { i++; v = v / 100; }
+    return v;
+  };
+  const product = (): number | null => {
+    let v = num();
+    while (v !== null && (peek() === '*' || peek() === '/')) {
+      const op = src[i++]; const r = num();
+      if (r === null) return null;
+      if (op === '/' && r === 0) return null;
+      v = op === '*' ? v * r : v / r;
+    }
+    return v;
+  };
+  const sum = (): number | null => {
+    let v = product();
+    while (v !== null && (peek() === '+' || peek() === '-')) {
+      const op = src[i++]; const r = product();
+      if (r === null) return null;
+      v = op === '+' ? v + r : v - r;
+    }
+    return v;
+  };
+  const v = sum();
+  return v !== null && i === src.length && Number.isFinite(v) ? Math.round(v * 1e6) / 1e6 : null;
+}
+
+function Calculator({ onClose }: { onClose: () => void }) {
+  const [text, setText] = useState('');
+  const [tape, setTape] = useState<string[]>([]);
+  const value = calculate(text);
+  return (
+    <div className="modal-back">
+      <div className="modal" data-testid="calculator">
+        <h3>Calculator</h3>
+        <div className="hint" style={{ minHeight: 18 }}>{tape.slice(-5).map((t, k) => <div key={k}>{t}</div>)}</div>
+        <input
+          className="f" autoFocus value={text} aria-label="Calculation" onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }
+            if (e.key === 'Escape') onClose();
+            if (e.key === 'Enter' && value !== null) {
+              setTape((t) => [...t, `${text} = ${value.toLocaleString('en-IN')}`]);
+              setText(String(value));
+              navigator.clipboard?.writeText(String(value)).catch(() => {});
+            }
+          }}
+        />
+        <div className="hint">{text ? (value === null ? 'Type a sum like 1250*12 + 18%' : `= ${value.toLocaleString('en-IN')}`) : 'Type a sum and press Enter. The answer is copied. Esc closes.'}</div>
       </div>
     </div>
   );

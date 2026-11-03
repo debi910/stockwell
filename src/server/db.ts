@@ -270,7 +270,7 @@ function migrate(db: DB) {
       id INTEGER PRIMARY KEY, voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE, line_no INTEGER NOT NULL,
       ledger_id INTEGER NOT NULL REFERENCES ledgers(id), hsn TEXT NOT NULL DEFAULT '', gst_rate REAL NOT NULL DEFAULT 0,
       taxable INTEGER NOT NULL, cgst INTEGER NOT NULL DEFAULT 0, sgst INTEGER NOT NULL DEFAULT 0, igst INTEGER NOT NULL DEFAULT 0,
-      taxability TEXT NOT NULL DEFAULT 'taxable');
+      taxability TEXT NOT NULL DEFAULT 'taxable', base INTEGER);
     CREATE INDEX IF NOT EXISTS tax_lines_voucher ON tax_lines(voucher_id);
     CREATE TABLE IF NOT EXISTS voucher_charges (
       id INTEGER PRIMARY KEY, voucher_id INTEGER NOT NULL REFERENCES vouchers(id) ON DELETE CASCADE, line_no INTEGER NOT NULL,

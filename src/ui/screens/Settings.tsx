@@ -200,26 +200,34 @@ export function GstScreen({ active }: { active: boolean }) {
   const [g3, setG3] = useState<any>(null);
   const [ewb, setEwb] = useState<any[]>([]);
   const [chosen, setChosen] = useState<Set<number>>(new Set());
-  useTitle(`GST Returns · ${monthLabel(period)}`);
+  // QRMP (quarterly filing): the last month of a quarter files GSTR-1 and GSTR-3B for the whole quarter;
+  // the first two months only have the optional IFF for B2B bills.
+  const quarterly = nav.company.gst_filing === 'quarterly';
+  const mm = Number(period.slice(5, 7));
+  const quarterEnd = [3, 6, 9, 12].includes(mm);
+  const qStart = shiftMonth(period, -((mm - 1) % 3));
+  const iff = quarterly && !quarterEnd;
+  const range = quarterly && quarterEnd ? `period=${qStart}&toPeriod=${period}` : `period=${period}`;
+  useTitle(`GST Returns · ${quarterly && quarterEnd ? `${monthLabel(qStart)} to ${monthLabel(period)}` : monthLabel(period)}${iff ? ' (IFF)' : ''}`);
 
   const load = useCallback(async () => {
     const from = `${period}-01`;
     const to = `${shiftMonth(period, 1)}-01`;
     const [a, b, c] = await Promise.all([
-      api.get(`/api/gst/gstr1?period=${period}`),
-      api.get(`/api/gst/gstr3b?period=${period}`),
+      api.get(`/api/gst/gstr1?${range}${iff ? '&iff=1' : ''}`),
+      api.get(`/api/gst/gstr3b?${range}`),
       api.get(`/api/gst/eway-candidates?from=${from}&to=${to}&all=1`),
     ]);
     setG1(a); setG3(b);
     const pending = c.filter((v: any) => v.date < to);
     setEwb(pending);
     setChosen(new Set(pending.filter((v: any) => !v.ewb_no).map((v: any) => v.id)));
-  }, [period]);
+  }, [period, range, iff]);
   useEffect(() => { if (active) load().catch((e) => nav.toast(e.message, true)); }, [active, load]);
 
   const saveGstr1 = async () => {
     if (g1.missingGstin) { nav.toast('Add the company GSTIN first (F3).', true); return; }
-    const where = await saveTextFile(`GSTR1_${nav.company.gstin}_${period.replace('-', '')}.json`, JSON.stringify(g1.json, null, 1));
+    const where = await saveTextFile(`${iff ? 'IFF' : 'GSTR1'}_${nav.company.gstin}_${period.replace('-', '')}.json`, JSON.stringify(g1.json, null, 1));
     if (where) nav.toast(`GSTR-1 file saved: ${where}`);
   };
   const saveEwb = async () => {
@@ -267,6 +275,9 @@ export function GstScreen({ active }: { active: boolean }) {
         </div>
       </div>
 
+      {quarterly && <p className="hint" style={{ margin: '6px 0' }}>{iff
+        ? 'Quarterly filing (QRMP): this month has only the optional IFF for bills to registered shops. Pay this month\'s tax with PMT-06 by the 25th; GSTR-3B is filed after the quarter.'
+        : `Quarterly filing (QRMP): GSTR-1 and GSTR-3B below cover ${monthLabel(qStart)} to ${monthLabel(period)}.`}</p>}
       {tab === 'gstr1' && g1 && (
         <>
           <div className="cards">
@@ -383,7 +394,8 @@ export function ImportTally() {
   return (
     <div className="form" data-form style={{ maxWidth: 760 }}>
       <h2>Bring masters across from TallyPrime</h2>
-      <p className="hint" style={{ marginTop: 0 }}>Copies groups, ledgers (with GSTIN, address, opening balance), units, stock groups and stock items. Names that already exist in Stockwell are skipped, so running it twice is safe.</p>
+      <p className="hint" style={{ marginTop: 0 }}>Copies groups, ledgers (with GSTIN, address, opening balance and each pending bill with its date), units, stock groups, godowns and stock items (with each batch, its expiry and quantity). Names that already exist in Stockwell are skipped, so running it twice is safe.</p>
+      <p className="hint">Old vouchers stay in Tally for reference. The clean way to move is to start Stockwell's books on the 1st of a month (Company → Books begin from), with Tally's closing figures as the opening here.</p>
       <div className="section-title" style={{ marginTop: 6 }}>Way 1: straight from Tally (Tally open on this PC)</div>
       <ol className="steps">
         <li>In TallyPrime press F1 (Help) → Settings → Connectivity, set "TallyPrime acts as" to Both and Port to 9000.</li>
@@ -401,7 +413,7 @@ export function ImportTally() {
       <div className="actions" style={{ justifyContent: 'flex-start' }}><button className="btn" disabled={busy || !xml} onClick={() => run(true)}>Import this file</button></div>
       {result && (
         <div className="panel" style={{ marginTop: 14, padding: 12 }}>
-          <b>Added:</b> {result.groups} groups, {result.ledgers} ledgers, {result.units} units, {result.stockGroups} stock groups, {result.items} items.
+          <b>Added:</b> {result.groups} groups, {result.ledgers} ledgers ({result.bills ?? 0} pending bills), {result.units} units, {result.stockGroups} stock groups, {result.godowns ?? 0} godowns, {result.items} items ({result.batches ?? 0} batches).
           {result.skipped.length > 0 && <div className="subtle" style={{ marginTop: 6 }}>Skipped {result.skipped.length}: {result.skipped.slice(0, 12).join(', ')}{result.skipped.length > 12 ? '…' : ''}</div>}
           <div className="subtle" style={{ marginTop: 6 }}>Next: check the Trial Balance (opening balances should match Tally's), then start billing.</div>
         </div>
