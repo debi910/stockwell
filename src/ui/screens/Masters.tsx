@@ -1,21 +1,39 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
-import { promptBox } from '../components/Dialog';
-import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
-import { drCr, formatINR, isValidGstin, parseDate, rupeesText, shortDate, toPaise } from '../format';
+import { confirmBox, promptBox } from '../components/Dialog';
+import { DepthContext, isOwner, keyName, useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { drCr, focusNext, formatINR, isValidGstin, parseDate, rupeesText, shortDate, toPaise } from '../format';
 
 /** Ctrl+A saves; a second press while the first save is still going is ignored, so nothing is saved twice. */
 function useSave(save: () => Promise<void>) {
   const busy = useRef(false);
+  const nav = useNav();
+  const depth = useContext(DepthContext);
+  // Anything typed on this form: Esc then asks before throwing it away, as Tally's "Quit? Yes or No".
+  const touched = useRef(false);
+  useEffect(() => {
+    const mark = (e: Event) => {
+      const host = (e.target as HTMLElement | null)?.closest?.('[data-depth]');
+      if (host && Number(host.getAttribute('data-depth')) === depth) touched.current = true;
+    };
+    document.addEventListener('input', mark, true);
+    document.addEventListener('change', mark, true);
+    return () => { document.removeEventListener('input', mark, true); document.removeEventListener('change', mark, true); };
+  }, [depth]);
   const once = async () => {
     if (busy.current) return;
     busy.current = true;
-    try { await save(); } finally { busy.current = false; }
+    try { await save(); touched.current = false; } finally { busy.current = false; }
   };
   useScreenKeys((e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') { once(); return true; }
+    const k = keyName(e);
+    if ((k === 'Esc' || k === 'Ctrl+Q') && touched.current) {
+      confirmBox('Quit without saving? What you typed will be lost.', { yes: 'Quit', no: 'Keep typing' }).then((y) => { if (y) nav.pop(); });
+      return true;
+    }
     return false;
   });
   useKeyBar([{ key: 'Ctrl+A', label: 'Accept', run: once }], [save]);
@@ -111,7 +129,19 @@ export function LedgerForm({ id, name: initialName, groupHint, onSaved }: { id?:
         </>}
         {isParty && <>
           <div className="section-title">Mailing and GST details</div>
-          <Row label="Address" wide><textarea className="f" name="Address" aria-label="Address" rows={2} value={l.address ?? ''} onChange={(e) => set('address')(e.target.value)} /></Row>
+          <Row label="Address" wide><textarea className="f" name="Address" aria-label="Address" rows={2} value={l.address ?? ''} onChange={(e) => set('address')(e.target.value)}
+            title="Enter adds a line; Enter on an empty line moves on"
+            onKeyDown={(e) => {
+              // Enter on an empty line (or an empty box) finishes the address and goes to the next field.
+              if (e.key !== 'Enter' || e.shiftKey) return;
+              const t = e.currentTarget;
+              const before = t.value.slice(0, t.selectionStart ?? t.value.length);
+              if (!t.value.trim() || before.endsWith('\n') || before === '') {
+                e.preventDefault();
+                if (t.value.endsWith('\n')) set('address')(t.value.replace(/\n+$/, ''));
+                focusNext(t);
+              }
+            }} /></Row>
           <Row label="City / Town"><Text name="City" value={l.city} onChange={set('city')} /></Row>
           <Row label="Pincode"><Text name="Pincode" value={l.pincode} onChange={set('pincode')} /></Row>
           <Row label="State">
@@ -179,7 +209,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
       delete (body as any).rates; delete (body as any).prices;
       if (newRate.rate !== '' && !parseDate(newRate.from)) { nav.toast('Enter the date the new GST rate applies from, e.g. 1-4-27.', true); return; }
       const saved = id ? await api.put(`/api/items/${id}`, body) : await api.post('/api/items', body);
-      if (levels.length) await api.put(`/api/items/${saved.id}/prices`, Object.fromEntries(levels.map((lv) => [lv, toPaise(prices[lv] || 0)])));
+      if (levels.length && isOwner(nav)) await api.put(`/api/items/${saved.id}/prices`, Object.fromEntries(levels.map((lv) => [lv, toPaise(prices[lv] || 0)])));
       if (newRate.rate !== '') await api.post('/api/items/gst-rate', { itemIds: [saved.id], rate: Number(newRate.rate), from: parseDate(newRate.from) });
       nav.toast(`Item "${saved.name}" saved`);
       onSaved?.(saved);
@@ -233,7 +263,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         <Row label="MRP"><Text name="MRP" num value={money.mrp} onChange={m('mrp')} /></Row>
         <Row label="Selling rate (before GST)"><Text name="Selling rate" num value={money.sale_rate} onChange={m('sale_rate')} /></Row>
         <Row label="Purchase rate (before GST)"><Text name="Purchase rate" num value={money.purchase_rate} onChange={m('purchase_rate')} /></Row>
-        {levels.map((lv) => <Row key={lv} label={`${lv} rate`}><Text name={`${lv} rate`} num value={prices[lv] ?? ''} onChange={(v) => setPrices((p) => ({ ...p, [lv]: v }))} /></Row>)}
+        {isOwner(nav) && levels.map((lv) => <Row key={lv} label={`${lv} rate`}><Text name={`${lv} rate`} num value={prices[lv] ?? ''} onChange={(v) => setPrices((p) => ({ ...p, [lv]: v }))} /></Row>)}
         <Row label="Track batches & expiry"><YesNo name="Track batches" value={!!it.track_batch} onChange={(v) => set('track_batch')(v ? 1 : 0)} /></Row>
         <Row label="Reorder level"><Text name="Reorder level" num value={it.reorder_level} onChange={set('reorder_level')} /></Row>
         <div className="section-title">Scheme (buy X get Y free)</div>

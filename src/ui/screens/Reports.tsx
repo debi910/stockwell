@@ -27,15 +27,29 @@ export function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolea
 export function Period({ from, to, onChange, single }: { from?: string; to: string; onChange: (from: string, to: string) => void; single?: boolean }) {
   const [f, setF] = useState(from ? shortDate(from) : '');
   const [t, setT] = useState(shortDate(to));
+  const nav = useNav();
   const apply = () => {
     const tt = parseDate(t, to);
     const ff = single ? undefined : parseDate(f, from ?? to);
-    if (tt && (single || ff)) onChange(ff ?? tt, tt);
+    if (!tt || (!single && !ff)) {
+      nav.toast(`"${!tt ? t : f}" is not a date. Type it like 1-10-26.`, true);
+      setF(from ? shortDate(from) : ''); setT(shortDate(to));
+      return;
+    }
+    if (ff && ff > tt) { nav.toast('The From date is after the To date.', true); return; }
+    onChange(ff ?? tt, tt);
   };
+  const keys = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.currentTarget.getAttribute('aria-label') === 'From date') (e.currentTarget.parentElement?.querySelector('[aria-label="To date"]') as HTMLInputElement | null)?.focus();
+    else e.currentTarget.blur(); // leaving the box applies the period
+  };
+  const sel = (e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select();
   return (
     <>
-      {!single && <><span className="subtle">From</span><input className="f" aria-label="From date" value={f} onChange={(e) => setF(e.target.value)} onBlur={apply} onKeyDown={(e) => e.key === 'Enter' && apply()} /></>}
-      <span className="subtle">{single ? 'As on' : 'To'}</span><input className="f" aria-label="To date" value={t} onChange={(e) => setT(e.target.value)} onBlur={apply} onKeyDown={(e) => e.key === 'Enter' && apply()} />
+      {!single && <><span className="subtle">From</span><input className="f" aria-label="From date" value={f} onFocus={sel} onChange={(e) => setF(e.target.value)} onBlur={(e) => { if ((e.relatedTarget as HTMLElement | null)?.getAttribute('aria-label') !== 'To date') apply(); }} onKeyDown={keys} /></>}
+      <span className="subtle">{single ? 'As on' : 'To'}</span><input className="f" aria-label="To date" value={t} onFocus={sel} onChange={(e) => setT(e.target.value)} onBlur={apply} onKeyDown={keys} />
     </>
   );
 }
@@ -70,7 +84,9 @@ export function DayBook({ active }: { active: boolean }) {
     { key: 'Alt+2', label: 'Duplicate', run: () => act('dup'), disabled: !cur },
     ...(owner ? [{ key: 'Alt+X', label: 'Cancel voucher', run: () => act('cancel'), disabled: !cur || !!cur?.cancelled }, { key: 'Alt+D', label: 'Delete', run: () => act('delete'), disabled: !cur }] : []),
   ], [cur, owner, range]);
-  const total = rows.filter((r) => !r.cancelled).reduce((a, r) => a + r.total, 0);
+  // Orders, notes, memoranda and optional vouchers are listed but are not money in the books.
+  const BOOK_TYPES = ['sales', 'purchase', 'credit_note', 'debit_note', 'receipt', 'payment', 'contra', 'journal'];
+  const total = rows.filter((r) => !r.cancelled && !r.optional && BOOK_TYPES.includes(r.type)).reduce((a, r) => a + r.total, 0);
   return (
     <div className="report">
       <div className="toolbar"><Period from={range.from} to={range.to} onChange={(from, to) => setRange({ from, to })} /><span className="subtle">{rows.length} vouchers</span></div>

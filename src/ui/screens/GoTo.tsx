@@ -70,12 +70,12 @@ const DESTS: Dest[] = [
   { label: 'Purchase Orders / Receipt Notes Pending', group: 'Report', open: screen('pending-orders', { kind: 'purchase' }) },
   { label: 'TDS Register', group: 'Report', open: screen('tds'), owner: true },
   { label: 'GSTR-2B Reconciliation', group: 'Report', open: screen('gstr2b'), owner: true },
-  { label: 'Godowns', group: 'Create Master', open: screen('godowns') },
+  { label: 'Godowns', group: 'Create Master', open: screen('godowns'), owner: true },
   { label: 'Change GST Rate (many items)', group: 'Alter Master', open: screen('gst-rate'), owner: true },
   { label: 'Company Features (F11)', group: 'Company', open: screen('features'), owner: true },
   { label: 'Company Settings', group: 'Company', open: screen('company'), owner: true },
   { label: 'Users and Passwords', group: 'Company', open: screen('users'), owner: true },
-  { label: 'Backup / Restore', group: 'Data', open: screen('backup') },
+  { label: 'Backup / Restore', group: 'Data', open: screen('backup'), owner: true },
   { label: 'Import from Tally', group: 'Data', open: screen('import-tally'), owner: true },
 ];
 

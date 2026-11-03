@@ -45,7 +45,10 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
     else if (ref) ref.current = el;
   };
 
-  useEffect(() => { if (!open) setText(current?.label ?? ''); }, [current?.label, open]);
+  // What the user typed is kept while the list is open; otherwise (or when nothing was typed yet, e.g. the
+  // default Cash account arriving after the screen opened) the box shows the chosen master's name.
+  const typed = useRef(false);
+  useEffect(() => { if (!open || !typed.current) setText(current?.label ?? ''); }, [current?.label, open]);
 
   const filtered = useMemo(() => {
     const t = text.trim().toLowerCase();
@@ -81,7 +84,7 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
         placeholder={placeholder}
         autoFocus={autoFocus}
         autoComplete="off"
-        onFocus={(e) => { setOpen(true); e.currentTarget.select(); const i = options.findIndex((o) => o.id === current?.id); setSel(i >= 0 ? i : 0); }}
+        onFocus={(e) => { typed.current = false; setOpen(true); e.currentTarget.select(); const i = options.findIndex((o) => o.id === current?.id); setSel(i >= 0 ? i : 0); }}
         onBlur={() => {
           // Typed a whole name (or narrowed the list to one) and left with Tab: take it, as Enter would.
           const t = text.trim().toLowerCase();
@@ -91,7 +94,7 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
           }
           setTimeout(() => setOpen(false), 120);
         }}
-        onChange={(e) => { setText(e.target.value); setOpen(true); setSel(0); }}
+        onChange={(e) => { typed.current = true; setText(e.target.value); setOpen(true); setSel(0); }}
         onKeyDown={(e) => {
           if (e.ctrlKey && e.key === 'Enter' && onAlter) {
             e.preventDefault(); e.stopPropagation();
@@ -111,6 +114,8 @@ export const Combo = forwardRef<HTMLInputElement, Props>(function Combo(
             if (!text.trim() && onEmptyEnter) { setOpen(false); onEmptyEnter(); return; }
             if (filtered.length) pick(filtered[sel]);
             else if (onCreate && text.trim()) { setOpen(false); onCreate(text.trim()); }
+            // Nothing to pick from and nothing typed (an optional field with an empty list): move on.
+            else if (!text.trim()) { setOpen(false); focusNext(inputRef.current); }
           } else if (e.key === 'Escape' && text !== (current?.label ?? '')) {
             e.stopPropagation(); setText(current?.label ?? '');
           }

@@ -313,8 +313,24 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
 
   // ---------- accounting lines ----------
   const setAccLine = (key: number, patch: Partial<AccLine>) => setAcc((ls) => {
-    const next = ls.map((l) => (l.key === key ? { ...l, ...patch } : l));
-    if (next[next.length - 1].ledgerId) next.push(blankAcc(journal ? (drTotal() > crTotal(next) ? 'Cr' : 'Dr') : 'Cr'));
+    let next = ls.map((l) => (l.key === key ? { ...l, ...patch } : l));
+    if (journal) {
+      // As in Tally: a new line takes the side that balances the entry, and picking its ledger fills in the difference.
+      const others = next.filter((l) => l.key !== key);
+      const diff = drTotal(others) - crTotal(others);
+      next = next.map((l) => {
+        if (l.key !== key || !patch.ledgerId || l.amount) return l;
+        return diff ? { ...l, side: diff > 0 ? 'Cr' : 'Dr', amount: rupeesText(Math.abs(diff)) } : l;
+      });
+    }
+    if (next[next.length - 1].ledgerId) next.push(blankAcc(journal ? (drTotal(next) > crTotal(next) ? 'Cr' : 'Dr') : 'Cr'));
+    if (journal) {
+      const last = next[next.length - 1];
+      if (!last.ledgerId && !last.amount) {
+        const side: 'Dr' | 'Cr' = drTotal(next) > crTotal(next) ? 'Cr' : 'Dr';
+        if (last.side !== side) next = [...next.slice(0, -1), { ...last, side }];
+      }
+    }
     return next;
   });
   const drTotal = (ls = acc) => ls.filter((l) => l.side === 'Dr').reduce((a, l) => a + toPaise(l.amount || 0), 0);
@@ -511,7 +527,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       return false;
     }
     if (k === 'Ctrl+A') { save(); return true; }
-    if (k === 'Esc' && dirty) {
+    if ((k === 'Esc' || k === 'Ctrl+Q') && dirty) {
       // Like Tally's "Quit? Yes or No": an unsaved voucher is never thrown away by one stray Esc.
       confirmBox(id ? 'Leave without saving the changes?' : 'Quit this voucher? What you typed will be lost.', { yes: 'Quit', no: 'Keep typing' })
         .then((quit) => { if (quit) nav.pop(); });
@@ -519,8 +535,10 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     }
     if (TYPE_KEYS[k] && !id) {
       const t = TYPE_KEYS[k];
-      if (STOCK_TYPES.includes(t)) { nav.replace({ name: 'voucher', props: { type: t } }); return true; }
-      switchType(t);
+      if (t === type) return true;
+      const go = () => (STOCK_TYPES.includes(t) ? nav.replace({ name: 'voucher', props: { type: t } }) : switchType(t));
+      if (dirty) confirmBox(`Change to ${VOUCHER_LABEL[t]}? What you typed in this ${label} will be lost.`, { yes: 'Change', no: 'Keep typing' }).then((y) => { if (y) go(); });
+      else go();
       return true;
     }
     if (k === 'Ctrl+H') {
@@ -559,6 +577,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       else setAcc((ls) => cut(ls, () => blankAcc(journal ? 'Dr' : 'Cr')));
       return true;
     }
+    if ((k === 'Alt+X' || k === 'Alt+D') && id && !owner) { nav.toast('Only an Owner can cancel or delete a voucher.', true); return true; }
     if (k === 'Alt+X' && id) { cancelVoucher(); return true; }
     if (k === 'Alt+D' && id) { deleteVoucher(); return true; }
     if (k === 'Alt+2' && (id ?? last?.id)) { nav.push({ name: 'voucher', props: { type, copyFrom: id ?? last.id } }); return true; }
@@ -581,7 +600,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     ...(inventory && mode === 'item' ? [{ key: 'Alt+S', label: 'Stock query', run: () => { const r = lines.find((l) => l.itemId); if (r) setQuery(r.itemId); } }] : []),
     { key: 'Ctrl+R', label: 'Last narration', run: () => retrieveNarration(false) },
     { key: 'F12', label: 'Configure', run: () => setShowConfig(true) },
-    ...(id ? [{ key: 'Alt+X', label: 'Cancel voucher', run: cancelVoucher }, { key: 'Alt+D', label: 'Delete', run: deleteVoucher }] : []),
+    ...(id && owner ? [{ key: 'Alt+X', label: 'Cancel voucher', run: cancelVoucher }, { key: 'Alt+D', label: 'Delete', run: deleteVoucher }] : []),
     ...(id && type === 'receipt' && owner && !loadedVoucher?.bounced_by ? [{ key: 'Alt+B', label: 'Cheque bounced', run: bounce }] : []),
     { key: 'PageUp', label: 'Previous voucher', run: () => neighbour('prev'), hidden: true },
     { key: 'PageDown', label: 'Next voucher', run: () => neighbour('next'), hidden: true },
@@ -606,9 +625,9 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     name: 'ledger-form',
     props: { name: typed, groupHint: SELL.includes(type) ? 'Sundry Debtors' : 'Sundry Creditors', onSaved: (l: any) => { reloadMasters(); setPartyId(l.id); } },
   });
-  const alterLedger = (lid: number) => nav.push({ name: 'ledger-form', props: { id: lid, onSaved: () => reloadMasters() } });
-  const alterItem = (iid: number) => nav.push({ name: 'item-form', props: { id: iid, onSaved: () => reloadMasters() } });
-  const createItem = (key: number) => (typed: string) => nav.push({ name: 'item-form', props: { name: typed, onSaved: async (it: any) => { await reloadMasters(); setLine(key, { itemId: it.id, rate: rupeesText(it.sale_rate) }); } } });
+  const alterLedger = (lid: number) => (!owner ? nav.toast('Only an Owner can alter masters.', true) : nav.push({ name: 'ledger-form', props: { id: lid, onSaved: () => reloadMasters() } }));
+  const alterItem = (iid: number) => (!owner ? nav.toast('Only an Owner can alter masters.', true) : nav.push({ name: 'item-form', props: { id: iid, onSaved: () => reloadMasters() } }));
+  const createItem = (key: number) => (typed: string) => nav.push({ name: 'item-form', props: { name: typed, onSaved: async (it: any) => { await reloadMasters(); setLine(key, { itemId: it.id, rate: rupeesText(defaultRate(it)) }); } } });
   const showEway = type === 'sales' && totals.total > company.ewb_threshold;
   const partyLabel = SELL.includes(type) ? 'Party A/c name' : 'Supplier A/c name';
 
@@ -800,7 +819,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
               )}
               {showEway && <div className="hint"><span className="tag warn">e-Way Bill needed</span> This bill is over ₹{formatINR(company.ewb_threshold)}. Fill the vehicle and distance; make the e-Way Bill from GST Returns.</div>}
               <div className="hint" style={{ marginTop: 6 }}>
-                {mode === 'accounting' ? 'Type ledgers and amounts; Ctrl+H goes back to items.' : `Enter on an empty item line finishes items.${items.some((i) => i.alt_unit) ? ' Type "2 case" for the alternate unit.' : ''}`} Ctrl+A saves.
+                {mode === 'accounting' ? 'Type ledgers and amounts; Ctrl+H goes back to items.' : `Enter on an empty item line finishes items.${(() => { const a = items.find((i) => i.alt_unit && lines.some((l) => l.itemId === i.id)) ?? items.find((i) => i.alt_unit); return a ? ` Type "2 ${a.alt_unit.toLowerCase()}" for the alternate unit.` : ''; })()}`} Ctrl+A saves.
               </div>
             </div>
             {totalsTable}

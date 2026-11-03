@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { DB } from './db';
 import { computeBill, isIntraState, isValidGstin, schemeFreeQty, stateFromGstin } from '../core/gst';
 import { addDays, daysBetween, financialYear, todayISO } from '../core/dates';
+import { formatINR } from '../core/money';
 import type { Nature } from '../core/groups';
 
 /** Who is making the current request, so the edit log can name them. */
@@ -218,6 +219,9 @@ export class Books {
   }
 
   createGroup(g: { name: string; parentId: number }) {
+    if (!g || typeof g !== 'object') fail('The group details are missing.');
+    if (g.parentId === undefined || g.parentId === null || (g.parentId as unknown) === '') fail('Choose the group it comes under.');
+    if (typeof g.name !== 'string') fail('Group name is required.');
     const parent = this.group(g.parentId);
     const name = g.name?.trim() || fail('Group name is required.');
     const r = this.db.prepare(`INSERT INTO groups (name, parent_id, nature, direct) VALUES (?, ?, ?, ?)`)
@@ -1262,7 +1266,7 @@ export class Books {
             WHERE e.ledger_id=? AND v.cancelled=0 AND v.optional=0 AND v.id<>?`).get(party.id, excludeId) as { s: number }).s + party.opening;
           const problems: string[] = [];
           if (party.credit_limit > 0 && bal + totals.total > party.credit_limit) {
-            problems.push(`${party.name} would owe ₹${(Math.round(bal + totals.total) / 100).toFixed(2)}, over the credit limit of ₹${(party.credit_limit / 100).toFixed(2)}.`);
+            problems.push(`${party.name} would owe ₹${formatINR(Math.round(bal + totals.total))}, over the credit limit of ₹${formatINR(party.credit_limit)}.`);
           }
           if (party.block_overdue) {
             const overdue = this.pendingBills({ ledgerId: party.id, asOf: input.date }).filter((b) => b.pending > 0 && b.overdue_days > 0);

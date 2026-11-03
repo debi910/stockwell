@@ -346,7 +346,11 @@ export function TdsRegister({ active }: { active: boolean }) {
 // ---------------- GSTR-2B matching ----------------
 export function Gstr2b() {
   const nav = useNav();
-  const [period, setPeriod] = useState(() => { const d = new Date(`${nav.workDate}T00:00:00`); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); });
+  const [period, setPeriod] = useState(() => {
+    // Last month, worked out on the calendar (not through UTC, which shifts the 1st back a day in India).
+    const [y, m] = nav.workDate.split('-').map(Number);
+    return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+  });
   const [json, setJson] = useState<any>(null);
   const [res, setRes] = useState<any>(null);
   const [tab, setTab] = useState<'mismatched' | 'onlyIn2b' | 'onlyInBooks' | 'matched'>('mismatched');

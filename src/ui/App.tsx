@@ -24,7 +24,7 @@ export function App() {
     window.addEventListener('unhandledrejection', onRejection);
     return () => window.removeEventListener('unhandledrejection', onRejection);
   }, []);
-  const toaster = <><DialogHost /><Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 34, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
+  const toaster = <><DialogHost /><Toaster position="top-right" duration={3000} visibleToasts={3} gap={8} offset={{ top: 84, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
   if (failed) return <div className="empty-state">Cannot reach the Stockwell server: {failed}. If this is the second PC, check the main PC is on.</div>;
   if (!session) return <div className="empty-state">Opening Stockwell…</div>;
   if (session.needsOwnerSetup) {
@@ -94,6 +94,55 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   navRef.current = nav;
 
   const openVoucher = (type: string) => navRef.current.push({ name: 'voucher', props: { type } });
+  // Go To pressed while Go To is open goes back to its search box instead of opening a second one.
+  const openGoTo = () => {
+    const st = stackRef.current;
+    if (st[st.length - 1]?.name === 'goto') (document.querySelector('[data-depth] [aria-label="Go To"]') as HTMLInputElement | null)?.select();
+    else navRef.current.push({ name: 'goto' });
+  };
+
+  // Keep the cursor in the screen: after a line is removed, a pop-up closes or a screen comes back to the top,
+  // the cursor returns to where it was (or the nearest field), so the keyboard flow never stalls.
+  const lastFocus = useRef<Record<number, HTMLElement>>({});
+  useEffect(() => {
+    const remember = (e: FocusEvent) => {
+      const el = e.target as HTMLElement;
+      const host = el.closest?.('[data-depth]');
+      if (host && !el.closest('.modal') && el.matches('input, select, textarea, button, [tabindex]')) lastFocus.current[Number(host.getAttribute('data-depth'))] = el;
+    };
+    document.addEventListener('focusin', remember);
+    return () => document.removeEventListener('focusin', remember);
+  }, []);
+  const restoreFocus = useCallback(() => {
+    const a = document.activeElement;
+    if (a && a !== document.body && (a as HTMLElement).offsetParent !== null) return;
+    if (document.querySelector('.modal-back, [role=dialog], [role=alertdialog]')) return;
+    const depth = stackRef.current.length - 1;
+    const host = document.querySelector(`[data-depth="${depth}"]`);
+    if (!host) return;
+    const usable = (el: Element | null | undefined): el is HTMLElement => !!el && host.contains(el) && (el as HTMLElement).offsetParent !== null && !(el as HTMLInputElement).disabled;
+    let target: HTMLElement | null = null;
+    const last = lastFocus.current[depth];
+    if (usable(last)) target = last;
+    else if (last) {
+      // The field went away (Ctrl+D removed its line): take the same field on the line above, e.g. "Item 3" → "Item 2".
+      const label = (last as HTMLElement).getAttribute('aria-label') ?? '';
+      const m = /^(.*?)(\d+)$/.exec(label);
+      for (let n = m ? Number(m[2]) : 0; m && n >= 1 && !target; n--) {
+        const el = host.querySelector(`[aria-label="${m[1]}${n}"]`);
+        if (usable(el)) target = el;
+      }
+    }
+    if (!target) target = Array.from(host.querySelectorAll<HTMLElement>('input.f, select.f, textarea.f, [role=menu], [tabindex="0"]')).find((el) => usable(el)) ?? null;
+    target?.focus();
+  }, []);
+  useEffect(() => {
+    const later = () => setTimeout(restoreFocus, 30);
+    document.addEventListener('focusout', later);
+    const t = setInterval(restoreFocus, 400); // a field removed while focused does not always send focusout
+    return () => { document.removeEventListener('focusout', later); clearInterval(t); };
+  }, [restoreFocus]);
+  useEffect(() => { const t = setTimeout(restoreFocus, 60); return () => clearTimeout(t); }, [stack.length, restoreFocus]);
 
   const globalKeys: KeyAction[] = [
     { key: 'F2', label: 'Date', run: () => setAskDate(true) },
@@ -110,8 +159,9 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     { key: 'F11', label: 'Features', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company features.') : navRef.current.push({ name: 'features' })) },
     { key: 'Ctrl+E', label: 'Export', hidden: true, run: () => exportVisibleTable(titles[stack.length - 1] ?? screenTitle(stack[stack.length - 1])) },
     { key: 'Ctrl+N', label: 'Calculator', hidden: true, run: () => setCalc(true) },
-    { key: 'Alt+G', label: 'Go To', run: () => navRef.current.push({ name: 'goto' }) },
-    { key: 'Ctrl+G', label: 'Go To', hidden: true, run: () => navRef.current.push({ name: 'goto' }) },
+    { key: 'Alt+G', label: 'Go To', run: () => openGoTo() },
+    { key: 'Ctrl+G', label: 'Go To', hidden: true, run: () => openGoTo() },
+    { key: 'F12', label: 'Configure', hidden: true, run: () => toast.info('F12 configures voucher entry. Open a voucher (F4 to F9) and press F12 there.') },
     // Ctrl+Q leaves a screen, and on the Gateway quits (logs out), as in TallyPrime.
     { key: 'Ctrl+Q', label: onLogout ? 'Quit / Log out' : 'Quit screen', run: () => {
       if (stackRef.current.length > 1) navRef.current.pop();
@@ -158,7 +208,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
             const C = SCREENS[s.name];
             return (
               <DepthContext.Provider key={`${i}-${s.name}-${s.uid ?? 0}`} value={i}>
-                <div style={{ display: i === top ? 'block' : 'none', height: '100%' }}>
+                <div data-depth={i} style={{ display: i === top ? 'block' : 'none', height: '100%' }}>
                   <ErrorBoundary onBack={() => nav.pop()}>
                     {C ? <C {...(s.props ?? {})} active={i === top} /> : <div className="empty-state">Unknown screen {s.name}</div>}
                   </ErrorBoundary>
