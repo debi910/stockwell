@@ -4,7 +4,7 @@ import { api } from '../api';
 import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
 import { confirmBox, promptBox } from '../components/Dialog';
-import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle, useBooksVersion } from '../nav';
 import { VOUCHER_LABEL, drCr, financialYear, formatINR, parseDate, shortDate } from '../format';
 import { Period, useRows } from './Reports';
 
@@ -23,7 +23,7 @@ export function Register({ type, active }: { type: string; active: boolean }) {
   const [data, setData] = useState<any>(null);
   const [month, setMonth] = useState<string | null>(null);
   useTitle(`${VOUCHER_LABEL[type]} Register${month ? ` · ${monthName(month)}` : ''}`);
-  useEffect(() => { if (active) api.get(`/api/reports/register?type=${type}&from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, type, range]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/register?type=${type}&from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), type, range]); // eslint-disable-line react-hooks/exhaustive-deps
   const rows: any[] = month ? (data?.rows ?? []).filter((r: any) => r.date.startsWith(month)) : data?.months ?? [];
   const { sel, setSel } = useRows(rows, (r: any) => (month ? nav.push({ name: 'voucher', props: { type, id: r.id } }) : setMonth(r.month)), () => { if (month) { setMonth(null); return true; } return false; });
   if (!data) return null;
@@ -69,7 +69,7 @@ export function SalesAnalysis({ by: initialBy, active }: { by?: string; active: 
   const [range, setRange] = useState({ from: fyStart(nav), to: nav.workDate });
   const [data, setData] = useState<any>(null);
   useTitle(`Sales by ${BY.find((b) => b[0] === by)?.[1]}`);
-  useEffect(() => { if (active) api.get(`/api/reports/sales-by?by=${by}&from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, by, range]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/sales-by?by=${by}&from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), by, range]); // eslint-disable-line react-hooks/exhaustive-deps
   const rows = data?.rows ?? [];
   const { sel, setSel } = useRows(rows, () => {});
   useKeyBar(BY.map(([k, l], i) => ({ key: `Alt+${i + 1}`, label: `By ${l}`, run: () => setBy(k) })), []);
@@ -110,7 +110,7 @@ export function GodownStock({ active }: { active: boolean }) {
   const [to, setTo] = useState(nav.workDate);
   const [data, setData] = useState<any>(null);
   useTitle('Godown Summary');
-  useEffect(() => { if (active) api.get(`/api/reports/godown-stock?asOf=${to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, to]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/godown-stock?asOf=${to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), to]); // eslint-disable-line react-hooks/exhaustive-deps
   const rows = data?.rows ?? [];
   const { sel, setSel } = useRows(rows, () => {});
   if (!data) return null;
@@ -168,7 +168,7 @@ export function SchemeClaims({ active }: { active: boolean }) {
   const [range, setRange] = useState({ from: fyStart(nav), to: nav.workDate });
   const [data, setData] = useState<any>(null);
   useTitle('Scheme Claims (free goods given)');
-  useEffect(() => { if (active) api.get(`/api/reports/scheme-claims?from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, range]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/scheme-claims?from=${range.from}&to=${range.to}`).then(setData).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), range]); // eslint-disable-line react-hooks/exhaustive-deps
   const rows = data?.rows ?? [];
   const { sel, setSel } = useRows(rows, () => {});
   if (!data) return null;
@@ -263,7 +263,7 @@ export function PdcRegister({ active }: { active: boolean }) {
   const nav = useNav();
   const [rows, setRows] = useState<any[]>([]);
   useTitle('Post-dated Cheques');
-  useEffect(() => { if (active) api.get(`/api/reports/pdc?asOf=${nav.workDate}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/pdc?asOf=${nav.workDate}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion()]); // eslint-disable-line react-hooks/exhaustive-deps
   const { sel, setSel } = useRows(rows, openVoucher(nav));
   return (
     <div className="report">
@@ -289,7 +289,7 @@ export function PendingOrders({ kind: initialKind, active }: { kind?: 'sales' | 
   const [kind, setKind] = useState<'sales' | 'purchase'>(initialKind ?? 'sales');
   const [rows, setRows] = useState<any[]>([]);
   useTitle(kind === 'sales' ? 'Sales Orders and Delivery Notes Pending' : 'Purchase Orders and Receipt Notes Pending');
-  useEffect(() => { if (active) api.get(`/api/reports/pending-orders?kind=${kind}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active, kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/pending-orders?kind=${kind}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), kind]); // eslint-disable-line react-hooks/exhaustive-deps
   const flat = useMemo(() => rows.flatMap((o) => o.lines.map((l: any, j: number) => ({ ...l, order: o, first: j === 0, key: `${o.id}-${l.item_id}` }))), [rows]);
   const { sel, setSel } = useRows(flat, (r: any) => openVoucher(nav)(r.order));
   useKeyBar([{ key: 'Alt+1', label: kind === 'sales' ? 'Purchase side' : 'Sales side', run: () => setKind((k) => (k === 'sales' ? 'purchase' : 'sales')) }], [kind]);
@@ -318,7 +318,7 @@ export function TdsRegister({ active }: { active: boolean }) {
   const [range, setRange] = useState({ from: fyStart(nav), to: nav.workDate });
   const [rows, setRows] = useState<any[]>([]);
   useTitle('TDS Register');
-  useEffect(() => { if (active) api.get(`/api/reports/tds?from=${range.from}&to=${range.to}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active, range]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (active) api.get(`/api/reports/tds?from=${range.from}&to=${range.to}`).then(setRows).catch((e) => nav.toast(e.message, true)); }, [active, useBooksVersion(), range]); // eslint-disable-line react-hooks/exhaustive-deps
   const { sel, setSel } = useRows(rows, (r: any) => nav.push({ name: 'ledger-report', props: { id: r.id } }));
   return (
     <div className="report">

@@ -87,6 +87,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.get('/api/meta', async () => ({
     states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.2.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
   }));
+  // Every change to the books writes an edit-log row, so its newest id tells open screens on any PC that something changed.
+  app.get('/api/changes', async () => ({ v: (books.db.prepare(`SELECT COALESCE(MAX(id),0) AS v FROM audit`).get() as { v: number }).v }));
   app.get('/api/company', async () => ({ ...books.company(), fy: financialYear(todayISO()), default_backup_dir: opts.defaultBackupDir ?? '' }));
   app.put('/api/company', async (req) => books.updateCompany(req.body as Record<string, never>));
 

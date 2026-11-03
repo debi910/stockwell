@@ -192,3 +192,4 @@ table.lines tr.empty td { height: 26px; }
 
 .linkish { border: 0; background: none; padding: 0; color: inherit; font: inherit; cursor: pointer; }
 .linkish:hover { color: var(--navy); text-decoration: underline; }
+.report table.r:focus { outline: none; }

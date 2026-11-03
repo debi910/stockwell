@@ -2,11 +2,14 @@ import { useState } from 'react';
 import { useScreenKeys } from '../nav';
 
 export type MenuEntry =
-  | { label: string; hot?: string; run: () => void }
+  | { label: string; hot?: string; run: () => void; hidden?: boolean }
   | { section: string }
   | { gap: true };
 
-const isItem = (e: MenuEntry): e is { label: string; hot?: string; run: () => void } => 'label' in e;
+type Item = { label: string; hot?: string; run: () => void; hidden?: boolean };
+const isItem = (e: MenuEntry): e is Item => 'label' in e && !e.hidden;
+/** Not shown (say, owner-only for an operator), but its key still answers, so a key press is never silently ignored. */
+const isHidden = (e: MenuEntry): e is Item => 'label' in e && !!e.hidden;
 
 /** Keyboard menu: arrows move, Enter opens, the highlighted letter jumps straight to an item. */
 /** Each entry gets its own hot letter: the one given, else the first letter of the label not already taken. */
@@ -22,8 +25,10 @@ function hotLetters(items: { label: string; hot?: string }[]) {
 }
 
 export function Menu({ title, entries }: { title: string; entries: MenuEntry[] }) {
-  const items = entries.filter(isItem);
+  const shownEntries = entries.filter((e) => !isHidden(e));
+  const items = shownEntries.filter(isItem);
   const hots = hotLetters(items);
+  const hidden = entries.filter(isHidden);
   const [sel, setSel] = useState(0);
   useScreenKeys((e) => {
     if (e.ctrlKey || e.altKey || e.metaKey) return false;
@@ -33,6 +38,8 @@ export function Menu({ title, entries }: { title: string; entries: MenuEntry[] }
     if (e.key.length === 1) {
       const idx = hots.findIndex((h) => h.toLowerCase() === e.key.toLowerCase());
       if (idx >= 0) { setSel(idx); items[idx].run(); return true; }
+      const h = hidden.find((x) => x.hot?.toLowerCase() === e.key.toLowerCase());
+      if (h) { h.run(); return true; }
     }
     return false;
   });
@@ -40,8 +47,13 @@ export function Menu({ title, entries }: { title: string; entries: MenuEntry[] }
   return (
     <div className="menu" role="menu" aria-label={title}>
       <div className="head">{title}</div>
-      {entries.map((e, i) => {
-        if ('section' in e) return <div key={i} className="section">{e.section}</div>;
+      {shownEntries.map((e, i) => {
+        if ('section' in e) {
+          // A heading with nothing under it (an operator does not see some entries) is left out.
+          const next = shownEntries.slice(i + 1).find((x) => !('gap' in x));
+          if (!next || 'section' in next) return null;
+          return <div key={i} className="section">{e.section}</div>;
+        }
         if ('gap' in e) return <div key={i} className="gap" />;
         n++;
         const idx = n;

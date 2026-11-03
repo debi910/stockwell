@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { DB } from './db';
 import { computeBill, isIntraState, isValidGstin, schemeFreeQty, stateFromGstin } from '../core/gst';
-import { addDays, daysBetween, financialYear, todayISO } from '../core/dates';
+import { addDays, daysBetween, financialYear, shortDate, todayISO } from '../core/dates';
 import { formatINR } from '../core/money';
 import type { Nature } from '../core/groups';
 
@@ -196,7 +196,7 @@ export class Books {
     if (patch.books_from !== undefined && patch.books_from !== before.books_from) {
       if (!isoDate(patch.books_from, 'The books start date')) fail('Enter the books start date as YYYY-MM-DD.');
       const earlier = this.db.prepare(`SELECT number, date FROM vouchers WHERE date<? LIMIT 1`).get(patch.books_from) as { number: string; date: string } | undefined;
-      if (earlier) fail(`Voucher ${earlier.number} is dated ${earlier.date}, before ${patch.books_from}. The books start date cannot move past existing vouchers.`);
+      if (earlier) fail(`Voucher ${earlier.number} is dated ${shortDate(earlier.date)}, before ${shortDate(patch.books_from)}. The books start date cannot move past existing vouchers.`);
     }
     for (const k of ['ewb_threshold', 'expiry_alert_days'] as const) {
       if (patch[k] !== undefined && !(Number(patch[k]) >= 0)) fail('Amounts and days in settings cannot be negative.');
@@ -641,7 +641,7 @@ export class Books {
     const existing = this.db.prepare(`SELECT id, expiry_date FROM batches WHERE item_id=? AND batch_no=?`).get(itemId, String(l.batchNo)) as { id: number; expiry_date: string | null } | undefined;
     if (existing) {
       const exp = isoDate(l.expiryDate, `The expiry date of batch ${l.batchNo}`);
-      if (exp && existing.expiry_date && exp !== existing.expiry_date) fail(`Batch ${l.batchNo} is already in stock with expiry ${existing.expiry_date}, not ${exp}. Check the expiry, or use a different batch number.`);
+      if (exp && existing.expiry_date && exp !== existing.expiry_date) fail(`Batch ${l.batchNo} is already in stock with expiry ${shortDate(existing.expiry_date)}, not ${shortDate(exp)}. Check the expiry, or use a different batch number.`);
       if (exp && !existing.expiry_date) this.db.prepare(`UPDATE batches SET expiry_date=? WHERE id=?`).run(exp, existing.id);
       return existing.id;
     }
@@ -797,7 +797,7 @@ export class Books {
     const v = this.voucher(id);
     const d = isoDate(date, 'The bank date');
     if (d && d < v.date) fail('The bank date cannot be before the voucher date.');
-    if (d && d > addDays(v.date, 400)) fail(`The bank date ${d} is more than a year after the voucher (${v.date}). Check the year.`);
+    if (d && d > addDays(v.date, 400)) fail(`The bank date ${shortDate(d)} is more than a year after the voucher (${shortDate(v.date)}). Check the year.`);
     const bank = this.db.prepare(`
       WITH RECURSIVE g(id) AS (SELECT id FROM groups WHERE name IN ('Bank Accounts', 'Bank OD A/c') UNION SELECT c.id FROM groups c JOIN g ON c.parent_id=g.id)
       SELECT 1 FROM entries e JOIN ledgers l ON l.id=e.ledger_id WHERE e.voucher_id=? AND l.group_id IN (SELECT id FROM g) LIMIT 1`).get(id);
@@ -849,7 +849,7 @@ export class Books {
     for (const [key, now] of this.stockLows(itemIds)) {
       const was = before.get(key)?.min ?? 0;
       if (now.min < -1e-9 && now.min < was - 1e-9) {
-        fail(`${why} the stock of ${now.what} would go below zero on ${now.date} (${now.min}), because other vouchers take it out. Check the dates and quantities.`);
+        fail(`${why} the stock of ${now.what} would go below zero on ${shortDate(now.date)} (${now.min}), because other vouchers take it out. Check the dates and quantities.`);
       }
     }
   }
@@ -943,7 +943,7 @@ export class Books {
       for (const [key, need] of take) {
         const [itemId, g] = key.split('|').map(Number);
         const have = this.stockOf(itemId, input.date, excludeId, g);
-        if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}${g !== 1 ? ` in ${this.godownName(g)}` : ''}: ${have} in stock on ${input.date}, this voucher takes out ${need}.`);
+        if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}${g !== 1 ? ` in ${this.godownName(g)}` : ''}: ${have} in stock on ${shortDate(input.date)}, this voucher takes out ${need}.`);
       }
     }
     return { total, party_id: null, account_id: null };
@@ -1179,7 +1179,7 @@ export class Books {
             if (!bid) fail(`Enter a batch number for ${item.name}.`);
             if (type === 'purchase' || type === 'receipt_note') {
               const b = this.db.prepare(`SELECT batch_no, expiry_date FROM batches WHERE id=?`).get(bid) as { batch_no: string; expiry_date: string | null };
-              if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${b.expiry_date}, before this bill. Check the expiry date.`);
+              if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${shortDate(b.expiry_date)}, before this bill. Check the expiry date.`);
             }
             if (l.mrp && Number(l.mrp) > 0) this.db.prepare(`UPDATE batches SET mrp=? WHERE id=?`).run(Math.round(Number(l.mrp)), bid);
             prepared.push({ ...base, batchId: bid });
@@ -1189,7 +1189,7 @@ export class Books {
             const bid = this.ownBatch(item.id, l.batchId);
             if (type === 'sales' || type === 'delivery_note') {
               const b = this.db.prepare(`SELECT batch_no, expiry_date FROM batches WHERE id=?`).get(bid) as { batch_no: string; expiry_date: string | null };
-              if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${b.expiry_date}. Expired stock cannot be sold; send it back with Rejection Out or write it off with a Stock Journal.`);
+              if (b.expiry_date && b.expiry_date < input.date) fail(`Batch ${b.batch_no} of ${item.name} expired on ${shortDate(b.expiry_date)}. Expired stock cannot be sold; send it back with Rejection Out or write it off with a Stock Journal.`);
             }
             prepared.push({ ...base, batchId: bid });
             continue;
@@ -1213,7 +1213,7 @@ export class Books {
           for (const [key, need] of needByItem) {
             const [itemId, g] = key.split('|').map(Number);
             const have = this.stockOf(itemId, input.date, excludeId, g);
-            if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}${g !== 1 ? ` in ${this.godownName(g)}` : ''}: ${have} in stock on ${input.date}, this voucher needs ${need}.`);
+            if (need > have + 1e-9) fail(`Not enough stock of ${this.item(itemId).name}${g !== 1 ? ` in ${this.godownName(g)}` : ''}: ${have} in stock on ${shortDate(input.date)}, this voucher needs ${need}.`);
           }
         }
       }
@@ -1526,7 +1526,7 @@ export class Books {
       FROM bills b JOIN ledgers l ON l.id=b.ledger_id
       WHERE b.date<=? ${filter}
       GROUP BY b.ledger_id, b.ref HAVING SUM(b.amount)<>0
-      ORDER BY l.name, COALESCE(MIN(CASE WHEN b.kind='new' THEN b.date END), MIN(b.date))`).all(...args) as {
+      ORDER BY l.name, COALESCE(MIN(CASE WHEN b.kind='new' THEN b.date END), MIN(b.date)), MIN(b.id)`).all(...args) as {
         ledger_id: number; ledger_name: string; phone: string; beat: string; salesman: string; credit_days: number;
         msme_buyer: number; msme_supplier: number; ref: string; pending: number; bill_date: string | null; due_date: string | null; bill_amount: number | null;
       }[];

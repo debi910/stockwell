@@ -3,7 +3,7 @@ import { api } from '../api';
 import { Combo } from '../components/Combo';
 import { Row, Select, Text, YesNo } from '../components/Field';
 import { confirmBox, promptBox } from '../components/Dialog';
-import { DepthContext, isOwner, keyName, useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { DepthContext, isOwner, keyName, useKeyBar, useNav, useScreenKeys, useTitle, useBooksVersion } from '../nav';
 import { drCr, focusNext, formatINR, isValidGstin, parseDate, rupeesText, shortDate, toPaise } from '../format';
 
 /** Ctrl+A saves; a second press while the first save is still going is ignored, so nothing is saved twice. */
@@ -357,7 +357,7 @@ export function MasterList({ kind, mode, active }: { kind: 'ledger' | 'item'; mo
   useTitle(kind === 'ledger' ? (mode === 'report' ? 'Select Ledger' : mode === 'view' ? 'Chart of Accounts' : 'Alter Ledger') : 'Alter Stock Item');
   useEffect(() => {
     if (active) api.get(kind === 'ledger' ? '/api/ledgers' : '/api/items').then(setRows);
-  }, [active, kind]);
+  }, [active, kind, useBooksVersion()]);
   const shown = rows.filter((r) => r.name.toLowerCase().includes(q.toLowerCase()));
   const open = (r: any) => {
     if (!r) return;

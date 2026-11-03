@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, openWhatsApp } from '../api';
-import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
+import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle, useBooksVersion, reportList } from '../nav';
 import { confirmBox } from '../components/Dialog';
 import { VOUCHER_LABEL, drCr, financialYear, formatINR, parseDate, shortDate } from '../format';
 
@@ -43,7 +43,12 @@ export function Period({ from, to, onChange, single }: { from?: string; to: stri
     if (e.key !== 'Enter') return;
     e.preventDefault(); e.stopPropagation();
     if (e.currentTarget.getAttribute('aria-label') === 'From date') (e.currentTarget.parentElement?.querySelector('[aria-label="To date"]') as HTMLInputElement | null)?.focus();
-    else e.currentTarget.blur(); // leaving the box applies the period
+    else {
+      // Leaving the box applies the period; the cursor goes back to the list so Enter opens a row.
+      const host = e.currentTarget.closest('[data-depth]');
+      e.currentTarget.blur();
+      if (host) reportList(host)?.focus();
+    }
   };
   const sel = (e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select();
   return (
@@ -60,7 +65,7 @@ export function DayBook({ active }: { active: boolean }) {
   const [range, setRange] = useState({ from: nav.workDate, to: nav.workDate });
   const [rows, setRows] = useState<any[]>([]);
   useTitle('Day Book');
-  useEffect(() => { if (active) api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows); }, [active, range]);
+  useEffect(() => { if (active) api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows); }, [active, useBooksVersion(), range]);
   const { sel, setSel } = useRows(rows, (r) => nav.push({ name: 'voucher', props: { type: r.type, id: r.id } }));
   const reload = () => api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows);
   const cur = rows[sel];
@@ -82,7 +87,8 @@ export function DayBook({ active }: { active: boolean }) {
   useKeyBar([
     { key: 'Alt+F2', label: 'Period', run: () => (document.querySelector('[aria-label="From date"]') as HTMLInputElement)?.focus() },
     { key: 'Alt+2', label: 'Duplicate', run: () => act('dup'), disabled: !cur },
-    ...(owner ? [{ key: 'Alt+X', label: 'Cancel voucher', run: () => act('cancel'), disabled: !cur || !!cur?.cancelled }, { key: 'Alt+D', label: 'Delete', run: () => act('delete'), disabled: !cur }] : []),
+    ...(owner ? [{ key: 'Alt+X', label: 'Cancel voucher', run: () => act('cancel'), disabled: !cur || !!cur?.cancelled }, { key: 'Alt+D', label: 'Delete', run: () => act('delete'), disabled: !cur }]
+      : [{ key: 'Alt+X', label: 'Cancel voucher', hidden: true, run: () => nav.toast('Only an Owner can cancel or delete a voucher.', true) }, { key: 'Alt+D', label: 'Delete', hidden: true, run: () => nav.toast('Only an Owner can cancel or delete a voucher.', true) }]),
   ], [cur, owner, range]);
   // Orders, notes, memoranda and optional vouchers are listed but are not money in the books.
   const BOOK_TYPES = ['sales', 'purchase', 'credit_note', 'debit_note', 'receipt', 'payment', 'contra', 'journal'];
@@ -133,7 +139,7 @@ export function TrialBalance({ active }: { active: boolean }) {
   const [data, setData] = useState<any>(null);
   const [detailed, setDetailed] = useState(false);
   useTitle('Trial Balance');
-  useEffect(() => { if (active) api.get(`/api/reports/trial-balance?to=${to}`).then(setData); }, [active, to]);
+  useEffect(() => { if (active) api.get(`/api/reports/trial-balance?to=${to}`).then(setData); }, [active, useBooksVersion(), to]);
   const rows = data ? flatten(data.tree, detailed) : [];
   const drill = useDrill();
   const { sel, setSel } = useRows(rows, drill);
@@ -174,7 +180,7 @@ export function GroupSummary({ id, name, active }: { id: number; name: string; a
   const nav = useNav();
   const [data, setData] = useState<any>(null);
   useTitle(`Group Summary: ${name}`);
-  useEffect(() => { if (active) api.get(`/api/reports/trial-balance?to=${nav.workDate}`).then(setData); }, [active, nav.workDate]);
+  useEffect(() => { if (active) api.get(`/api/reports/trial-balance?to=${nav.workDate}`).then(setData); }, [active, useBooksVersion(), nav.workDate]);
   const find = (nodes: Node[]): Node | null => { for (const n of nodes) { if (n.id === id) return n; const f = find(n.groups); if (f) return f; } return null; };
   const node = data ? find(data.tree) : null;
   const rows: Flat[] = node ? [
@@ -208,7 +214,7 @@ export function ProfitLoss({ active }: { active: boolean }) {
   const [range, setRange] = useState({ from: fy.start < nav.company.books_from ? nav.company.books_from : fy.start, to: nav.workDate });
   const [d, setD] = useState<any>(null);
   useTitle('Profit & Loss A/c');
-  useEffect(() => { if (active) api.get(`/api/reports/profit-loss?from=${range.from}&to=${range.to}`).then(setD); }, [active, range]);
+  useEffect(() => { if (active) api.get(`/api/reports/profit-loss?from=${range.from}&to=${range.to}`).then(setD); }, [active, useBooksVersion(), range]);
   const drill = useDrill();
   if (!d) return null;
   const sideRows = (nodes: Node[], sign: number) => nodes.map((n) => (
@@ -256,7 +262,7 @@ export function BalanceSheet({ active }: { active: boolean }) {
   const [to, setTo] = useState(nav.workDate);
   const [d, setD] = useState<any>(null);
   useTitle('Balance Sheet');
-  useEffect(() => { if (active) api.get(`/api/reports/balance-sheet?to=${to}`).then(setD); }, [active, to]);
+  useEffect(() => { if (active) api.get(`/api/reports/balance-sheet?to=${to}`).then(setD); }, [active, useBooksVersion(), to]);
   const drill = useDrill();
   if (!d) return null;
   const rows = (nodes: Node[], sign: number) => nodes.map((n) => (
@@ -290,7 +296,7 @@ export function LedgerReport({ id, active }: { id: number; active: boolean }) {
   const [range, setRange] = useState({ from: fy.start < nav.company.books_from ? nav.company.books_from : fy.start, to: nav.workDate });
   const [d, setD] = useState<any>(null);
   useTitle(d ? `Ledger: ${d.ledger.name}` : 'Ledger');
-  useEffect(() => { if (active) api.get(`/api/reports/ledger/${id}?from=${range.from}&to=${range.to}`).then(setD); }, [active, id, range]);
+  useEffect(() => { if (active) api.get(`/api/reports/ledger/${id}?from=${range.from}&to=${range.to}`).then(setD); }, [active, useBooksVersion(), id, range]);
   const rows = d?.lines ?? [];
   const { sel, setSel } = useRows(rows, (r: any) => nav.push({ name: 'voucher', props: { type: r.type, id: r.voucher_id } }));
   const remind = async () => {
@@ -334,7 +340,7 @@ export function StockSummary({ active }: { active: boolean }) {
   const [rows, setRows] = useState<any[]>([]);
   const [batchesOf, setBatchesOf] = useState<any>(null);
   useTitle('Stock Summary');
-  useEffect(() => { if (active) api.get(`/api/reports/stock-summary?to=${to}`).then(setRows); }, [active, to]);
+  useEffect(() => { if (active) api.get(`/api/reports/stock-summary?to=${to}`).then(setRows); }, [active, useBooksVersion(), to]);
   const { sel, setSel } = useRows(rows, async (r: any) => setBatchesOf({ item: r, list: await api.get(`/api/items/${r.id}/batches?asOf=${to}`) }),
     () => { if (!batchesOf) return false; setBatchesOf(null); return true; });
   const groups = [...new Set(rows.map((r) => r.stock_group ?? 'Other items'))];
@@ -389,7 +395,7 @@ export function Outstanding({ kind, active }: { kind: 'receivable' | 'payable'; 
   const [rows, setRows] = useState<any[]>([]);
   const [beat, setBeat] = useState('');
   useTitle(kind === 'receivable' ? 'Bills Receivable' : 'Bills Payable');
-  useEffect(() => { if (active) api.get(`/api/reports/outstanding?kind=${kind}&asOf=${nav.workDate}`).then(setRows); }, [active, kind, nav.workDate]);
+  useEffect(() => { if (active) api.get(`/api/reports/outstanding?kind=${kind}&asOf=${nav.workDate}`).then(setRows); }, [active, useBooksVersion(), kind, nav.workDate]);
   const beats = [...new Set(rows.map((r) => r.beat).filter(Boolean))];
   const shown = rows.filter((r) => !beat || r.beat === beat);
   const { sel, setSel } = useRows(shown, (r: any) => nav.push({ name: 'ledger-report', props: { id: r.ledger_id } }));
@@ -434,7 +440,7 @@ export function Alerts({ active }: { active: boolean }) {
   const nav = useNav();
   const [a, setA] = useState<any>(null);
   useTitle('Alerts & Reminders');
-  useEffect(() => { if (active) api.get(`/api/reports/alerts?asOf=${nav.workDate}`).then(setA); }, [active, nav.workDate]);
+  useEffect(() => { if (active) api.get(`/api/reports/alerts?asOf=${nav.workDate}`).then(setA); }, [active, useBooksVersion(), nav.workDate]);
   if (!a) return null;
   const remind = async (ledgerId: number) => {
     const m = await api.get(`/api/reports/reminder/${ledgerId}`);
@@ -496,7 +502,7 @@ export function Alerts({ active }: { active: boolean }) {
 export function AuditLog({ active }: { active: boolean }) {
   const [rows, setRows] = useState<any[]>([]);
   useTitle('Edit Log');
-  useEffect(() => { if (active) api.get('/api/audit').then(setRows); }, [active]);
+  useEffect(() => { if (active) api.get('/api/audit').then(setRows); }, [active, useBooksVersion()]);
   return (
     <div className="report">
       <table className="r"><thead><tr><th>When</th><th>User</th><th>What</th><th>Action</th></tr></thead><tbody>

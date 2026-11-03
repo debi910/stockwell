@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 
 export interface Screen {
   name: string;
@@ -88,3 +88,23 @@ export function keyName(e: KeyboardEvent): string {
 
 /** True when the person may see owner-only things (profit, edit log, settings). */
 export const isOwner = (nav: Nav) => !nav.user || nav.user.role === 'owner';
+
+/** Goes up whenever anyone, on any PC, changes the books. Put it in a report's fetch deps so an open
+ *  report refreshes by itself instead of showing figures from when it was opened. */
+export function useBooksVersion(): number {
+  const [v, setV] = useState(0);
+  useEffect(() => {
+    const on = () => setV((x) => x + 1);
+    window.addEventListener('stockwell:changed', on);
+    return () => window.removeEventListener('stockwell:changed', on);
+  }, []);
+  return v;
+}
+
+/** The list of a report screen (a table with no boxes to type in), made focusable. */
+export function reportList(host: Element): HTMLElement | null {
+  const t = host.querySelector<HTMLElement>('.report table.r');
+  if (!t || t.offsetParent === null || t.querySelector('input, select, textarea')) return null;
+  if (!t.hasAttribute('tabindex')) t.tabIndex = -1;
+  return t;
+}

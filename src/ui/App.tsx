@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import { api, downloadText, saveTextFile, desktop, setToken, whenLoggedOut } from './api';
-import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName } from './nav';
+import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName, reportList } from './nav';
 import { VOUCHER_LABEL, parseDate, shortDate, todayISO } from './format';
 import { TYPE_KEYS } from './screens/Voucher';
 import { SCREENS, screenTitle } from './screens';
@@ -24,7 +24,7 @@ export function App() {
     window.addEventListener('unhandledrejection', onRejection);
     return () => window.removeEventListener('unhandledrejection', onRejection);
   }, []);
-  const toaster = <><DialogHost /><Toaster position="top-right" duration={3000} visibleToasts={3} gap={8} offset={{ top: 84, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
+  const toaster = <><DialogHost /><Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 40, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
   if (failed) return <div className="empty-state">Cannot reach the Stockwell server: {failed}. If this is the second PC, check the main PC is on.</div>;
   if (!session) return <div className="empty-state">Opening Stockwell…</div>;
   if (session.needsOwnerSetup) {
@@ -81,7 +81,8 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     pop: () => { if (stackRef.current.length > 1) forgetFrom(stackRef.current.length - 1); setStack((st) => (st.length > 1 ? st.slice(0, -1) : st)); },
     replace: (s) => { forgetFrom(stackRef.current.length - 1); setStack((st) => [...st.slice(0, -1), { ...s, uid: ++screenSeq }]); },
     home: () => { forgetFrom(1); setStack((st) => st.slice(0, 1)); },
-    toast: (text, error) => (error ? toast.error(text, { duration: 6000 }) : toast.success(text)),
+    // One error at a time: a new refusal replaces the last one instead of piling up over the next bill.
+    toast: (text, error) => (error ? toast.error(text, { id: 'sw-error', duration: 6000 }) : (toast.dismiss('sw-error'), toast.success(text))),
     user,
     company, meta, refreshCompany, workDate, setWorkDate,
     setScreenKeys: (d, k) => setScreenKeysState((s) => ({ ...s, [d]: k })),
@@ -133,6 +134,8 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
         if (usable(el)) target = el;
       }
     }
+    // A report opens on its list, as in Tally (Alt+F2 or a click reaches the period), so Enter opens the selected row.
+    if (!target) target = reportList(host);
     if (!target) target = Array.from(host.querySelectorAll<HTMLElement>('input.f, select.f, textarea.f, [role=menu], [tabindex="0"]')).find((el) => usable(el)) ?? null;
     target?.focus();
   }, []);
@@ -144,9 +147,27 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   }, [restoreFocus]);
   useEffect(() => { const t = setTimeout(restoreFocus, 60); return () => clearTimeout(t); }, [stack.length, restoreFocus]);
 
+  // Another PC (or this one) changed the books: tell open reports and vouchers so they show current figures.
+  useEffect(() => {
+    let seen = -1;
+    let busy = false;
+    const poll = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const { v } = await api.get('/api/changes');
+        if (seen >= 0 && v !== seen) window.dispatchEvent(new Event('stockwell:changed'));
+        seen = v;
+      } catch { /* the server is busy or restarting; try again next time */ } finally { busy = false; }
+    };
+    poll(); // know where the books stand from the start, so the first change is not missed
+    const t = setInterval(poll, 4000);
+    return () => clearInterval(t);
+  }, []);
+
   const globalKeys: KeyAction[] = [
     { key: 'F2', label: 'Date', run: () => setAskDate(true) },
-    { key: 'F3', label: 'Company', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company settings.') : navRef.current.push({ name: 'company' })) },
+    { key: 'F3', label: 'Company', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company settings.', { id: 'owner-only-f3' }) : navRef.current.push({ name: 'company' })) },
     { key: 'F4', label: 'Contra', run: () => openVoucher('contra') },
     { key: 'F5', label: 'Payment', run: () => openVoucher('payment') },
     { key: 'F6', label: 'Receipt', run: () => openVoucher('receipt') },
@@ -156,7 +177,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     { key: 'F10', label: 'Other Vouchers', run: () => navRef.current.push({ name: 'voucher-types' }) },
     // TallyPrime's other voucher keys work everywhere but are not listed, as in Tally's button bar.
     ...Object.entries(TYPE_KEYS).filter(([k]) => !/^F\d$/.test(k)).map(([key, type]) => ({ key, label: VOUCHER_LABEL[type], run: () => openVoucher(type), hidden: true })),
-    { key: 'F11', label: 'Features', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company features.') : navRef.current.push({ name: 'features' })) },
+    { key: 'F11', label: 'Features', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company features.', { id: 'owner-only-f11' }) : navRef.current.push({ name: 'features' })) },
     { key: 'Ctrl+E', label: 'Export', hidden: true, run: () => exportVisibleTable(titles[stack.length - 1] ?? screenTitle(stack[stack.length - 1])) },
     { key: 'Ctrl+N', label: 'Calculator', hidden: true, run: () => setCalc(true) },
     { key: 'Alt+G', label: 'Go To', run: () => openGoTo() },

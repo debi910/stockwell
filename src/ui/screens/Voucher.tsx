@@ -4,7 +4,7 @@ import { api, desktop, openWhatsApp, printUrl } from '../api';
 import { Combo } from '../components/Combo';
 import { enterNext } from '../components/Field';
 import { confirmBox } from '../components/Dialog';
-import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle, keyName } from '../nav';
+import { isOwner, useBooksVersion, useKeyBar, useNav, useScreenKeys, useTitle, keyName } from '../nav';
 import { VOUCHER_LABEL, computeBill, drCr, focusNext, formatINR, isIntraState, parseDate, rateOn, rupeesText, schemeFreeQty, shortDate, toPaise } from '../format';
 
 const INVENTORY = ['sales', 'purchase', 'credit_note', 'debit_note', 'sales_order', 'purchase_order', 'rejection_in', 'rejection_out', 'delivery_note', 'receipt_note'];
@@ -152,6 +152,13 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     if (!id && date && !optional) api.get(`/api/vouchers/next-number?type=${type}&date=${date}`).then((r) => setNumber(r.number)).catch(() => {});
     if (!id && optional) setNumber('(optional)');
   }, [id, type, date, optional]);
+  // Another PC saved something: the next free number and the pending bills shown may have changed.
+  const booksVersion = useBooksVersion();
+  useEffect(() => {
+    if (!booksVersion) return;
+    if (!id && date && !optional && !numberTyped.current) api.get(`/api/vouchers/next-number?type=${type}&date=${date}`).then((r) => { if (!numberTyped.current) setNumber(r.number); }).catch(() => {});
+    for (const k of Object.keys(pending)) loadPending(Number(k)).catch(() => {});
+  }, [booksVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Defaults: the Sales/Purchase ledger for invoices, Cash for receipts and payments.
   useEffect(() => {
@@ -203,7 +210,10 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
           for (const itemId of new Set<number>(v.lines.filter((l: any) => l.batch_id).map((l: any) => l.item_id))) loadBatches(itemId);
         }
         if (v.charges?.length) setCharges([...v.charges.map((c: any) => ({ key: keySeq++, ledgerId: c.ledger_id, amount: rupeesText(c.amount) })), blankCharge()]);
-        if (PURCHASE_SIDE.includes(v.type) && v.round_off && !copy) setRoundOffText(rupeesText(v.round_off) || '0');
+        // Keep a round off only if it was typed from the supplier's bill. An automatic one is worked out
+        // again after an alteration, or a changed quantity would carry the old paise.
+        const autoRound = Math.round(Math.abs(v.total - v.round_off) / 100) * 100 * Math.sign(v.total - v.round_off) === v.total;
+        if (PURCHASE_SIDE.includes(v.type) && v.round_off && !copy && !autoRound) setRoundOffText(rupeesText(v.round_off) || '0');
         const agst = v.bills.find((b: any) => b.kind === 'agst');
         if (agst && !copy) setAgainstRef(agst.ref);
         else if (!copy && v.ref_no && (v.type === 'credit_note' || v.type === 'debit_note')) setAgainstRef(v.ref_no);
@@ -228,6 +238,8 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   const itemById = (iid: number | null) => items.find((i) => i.id === iid);
   const ledgerById = (lid: number | null) => ledgers.find((l) => l.id === lid);
   const showGodown = godowns.length > 1;
+  // Goods coming in take a batch number, expiry and MRP on the line: give them room.
+  const wideBatch = STOCK_IN.includes(type) && !againstId && lines.some((l) => itemById(l.itemId)?.track_batch);
 
   const loadPending = useCallback(async (ledgerId: number) => {
     const b = await api.get(`/api/reports/pending-bills/${ledgerId}`);
@@ -292,6 +304,10 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   const pickItem = (key: number, itemId: number) => {
     const it = itemById(itemId);
     setLine(key, { itemId, rate: rupeesText(defaultRate(it)), batchId: null, batchNo: '', freeTouched: false, alt: false });
+    const level = party?.price_level;
+    if (SELL.includes(type) && level && it && !it.prices?.[level]) {
+      nav.toast(`${it.name} has no ${level} rate yet, so its selling rate is used. Set ${level} rates in the stock item (Alter).`);
+    }
     if (it?.track_batch) loadBatches(itemId);
   };
 
@@ -456,7 +472,8 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       clientKey.current = newKey();
       // Clear the form before the "saved" message shows, so an Esc pressed right after it never asks "Quit?".
       flushSync(() => { setLast(v); reset(); });
-      nav.toast(`${label} ${v.number} saved · ₹${formatINR(v.total)}`);
+      const moved = !body.number && !optional && number && v.number !== number;
+      nav.toast(`${label} ${v.number} saved · ₹${formatINR(v.total)}${moved ? ` (No. ${number} was just used by another PC, so this bill got the next number)` : ''}`);
       if (date) api.get(`/api/vouchers/next-number?type=${type}&date=${date}`).then((r) => setNumber(r.number)).catch(() => {});
       if (Object.keys(batches).length) Object.keys(batches).forEach((k) => loadBatches(Number(k)));
     } catch (e: any) {
@@ -519,7 +536,19 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     setAcc([blankAcc(JOURNAL_LIKE.includes(t) ? 'Dr' : 'Cr')]); setPartyId(null); setMode('item'); setAgainstId(null); setPdc(false);
   };
 
-  const dirty = inventory ? !!partyId || filledLines.length > 0 || filledTax.length > 0 : acc.some((l) => l.ledgerId || l.amount);
+  // An opened voucher counts as changed only once something on it is typed or a line removed or added.
+  const depth = nav.depth;
+  const edited = useRef(false);
+  useEffect(() => {
+    const mark = (e: Event) => {
+      const host = (e.target as HTMLElement | null)?.closest?.('[data-depth]');
+      if (host && Number(host.getAttribute('data-depth')) === depth) edited.current = true;
+    };
+    document.addEventListener('input', mark, true);
+    document.addEventListener('change', mark, true);
+    return () => { document.removeEventListener('input', mark, true); document.removeEventListener('change', mark, true); };
+  }, [depth]);
+  const dirty = id ? edited.current : inventory ? !!partyId || filledLines.length > 0 || filledTax.length > 0 : acc.some((l) => l.ledgerId || l.amount);
   useScreenKeys((e) => {
     const k = keyName(e);
     if (modal) {
@@ -566,6 +595,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       // Ctrl+D removes the line the cursor is on; Alt+I puts a blank line above it.
       const key = currentRowKey();
       if (!key) return true;
+      edited.current = true;
       const cut = <T extends { key: number }>(ls: T[], blank: () => T) => {
         if (k === 'Alt+I') { const i = ls.findIndex((x) => x.key === key); return i < 0 ? ls : [...ls.slice(0, i), blank(), ...ls.slice(i)]; }
         const next = ls.filter((x) => x.key !== key);
@@ -749,7 +779,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
             <table className="lines">
               <thead>
                 <tr>
-                  <th style={{ width: '30%' }}>Name of item</th>{showGodown && <th>Godown</th>}<th style={{ width: '15%' }}>Batch</th>
+                  <th style={{ width: wideBatch ? '24%' : '30%' }}>Name of item</th>{showGodown && <th>Godown</th>}<th style={{ width: wideBatch ? '26%' : '15%' }}>Batch</th>
                   <th className="num">Quantity</th>{config.showFree && <th className="num">Free</th>}<th className="num">Rate</th>{config.showDisc && <th className="num">Disc %</th>}<th className="num">GST</th><th className="num">Amount</th>
                 </tr>
               </thead>
@@ -775,10 +805,10 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
                         {it?.track_batch && !['sales_order', 'purchase_order'].includes(type) ? (
                           STOCK_IN.includes(type) && !againstId ? (
                             <div style={{ display: 'flex', gap: 4 }}>
-                              <input className="f" aria-label={`Batch ${idx + 1}`} placeholder="Batch" value={l.batchNo} onChange={(e) => setLine(l.key, { batchNo: e.target.value })} onKeyDown={enterNext} />
-                              <input className="f" aria-label={`Expiry ${idx + 1}`} placeholder="Expiry" title="Expiry date, e.g. 30-11-26" value={l.expiry} onChange={(e) => setLine(l.key, { expiry: e.target.value })}
+                              <input className="f" aria-label={`Batch ${idx + 1}`} placeholder="Batch" style={{ flex: '1 1 96px', minWidth: 96 }} value={l.batchNo} onChange={(e) => setLine(l.key, { batchNo: e.target.value })} onKeyDown={enterNext} />
+                              <input className="f" aria-label={`Expiry ${idx + 1}`} placeholder="Expiry" title="Expiry date, e.g. 30-11-26" style={{ flex: 'none', width: 84 }} value={l.expiry} onChange={(e) => setLine(l.key, { expiry: e.target.value })}
                                 onBlur={(e) => { const d = parseDate(e.target.value, date ?? undefined); if (d) setLine(l.key, { expiry: shortDate(d) }); }} onKeyDown={enterNext} />
-                              <input className="f num" aria-label={`MRP ${idx + 1}`} placeholder="MRP" title="MRP printed on the pack" style={{ width: 70 }} value={l.mrp} onChange={(e) => setLine(l.key, { mrp: e.target.value })} onKeyDown={enterNext} />
+                              <input className="f num" aria-label={`MRP ${idx + 1}`} placeholder="MRP" title="MRP printed on the pack" style={{ flex: 'none', width: 70 }} value={l.mrp} onChange={(e) => setLine(l.key, { mrp: e.target.value })} onKeyDown={enterNext} />
                             </div>
                           ) : (
                             <Combo name={`Batch ${idx + 1}`} title="Batches (soonest expiry first)" value={l.batchId} onChange={(v) => setLine(l.key, { batchId: v })}

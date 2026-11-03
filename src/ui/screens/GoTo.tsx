@@ -84,10 +84,12 @@ export function GoTo() {
   const owner = isOwner(nav);
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(0);
-  const list = useMemo(() => {
+  const all = useMemo(() => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-    return DESTS.filter((d) => (owner || !d.owner) && words.every((w) => `${d.group} ${d.label}`.toLowerCase().includes(w)));
-  }, [q, owner]);
+    return DESTS.filter((d) => words.every((w) => `${d.group} ${d.label}`.toLowerCase().includes(w)));
+  }, [q]);
+  const list = all.filter((d) => owner || !d.owner);
+  const locked = q.trim() && !list.length ? all.find((d) => d.owner) : undefined;
   useScreenKeys((e) => {
     if (e.key === 'ArrowDown') { setSel((s) => Math.min(s + 1, list.length - 1)); return true; }
     if (e.key === 'ArrowUp') { setSel((s) => Math.max(s - 1, 0)); return true; }
@@ -107,7 +109,7 @@ export function GoTo() {
               <span>{d.label}</span><span className="subtle">{d.group}</span>
             </div>
           ))}
-          {!list.length && <div className="subtle" style={{ padding: 8 }}>Nothing matches.</div>}
+          {!list.length && <div className="subtle" style={{ padding: 8 }}>{locked ? `${locked.label} is for the Owner only.` : 'Nothing matches.'}</div>}
         </div>
       </div>
     </div>

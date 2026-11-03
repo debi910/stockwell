@@ -1,18 +1,26 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { Menu } from '../components/Menu';
-import { isOwner, useNav } from '../nav';
+import { Menu, MenuEntry } from '../components/Menu';
+import { isOwner, useBooksVersion, useNav } from '../nav';
 import { formatINR, shortDate } from '../format';
+
+/** Owner-only menu entries: shown to an Owner; for a Billing operator they are hidden, but their key says why. */
+function useOwnerOnly() {
+  const nav = useNav();
+  const owner = isOwner(nav);
+  return (entries: MenuEntry[]): MenuEntry[] => owner ? entries
+    : entries.flatMap((e) => ('label' in e && e.hot ? [{ ...e, hidden: true, run: () => nav.toast(`${e.label} is for the Owner only.`, true) }] : []));
+}
 
 export function Gateway({ active }: { active: boolean }) {
   const nav = useNav();
   const [alerts, setAlerts] = useState<any>(null);
   useEffect(() => {
     if (active) api.get(`/api/reports/alerts?asOf=${nav.workDate}`).then(setAlerts).catch(() => setAlerts(null));
-  }, [active, nav.workDate]);
+  }, [active, nav.workDate, useBooksVersion()]);
   const go = (name: string, props?: any) => () => nav.push({ name, props });
   const c = nav.company;
-  const owner = isOwner(nav);
+  const ownerOnly = useOwnerOnly();
 
   return (
     <div className="gateway">
@@ -59,22 +67,22 @@ export function Gateway({ active }: { active: boolean }) {
         entries={[
           { section: 'Masters' },
           { label: 'Create', run: go('create-menu') },
-          ...(owner ? [{ label: 'Alter', hot: 'A', run: go('alter-menu') }] : []),
+          ...ownerOnly([{ label: 'Alter', hot: 'A', run: go('alter-menu') }]),
           { label: 'Chart of Accounts', hot: 'H', run: go('master-list', { kind: 'ledger', mode: 'view' }) },
           { section: 'Transactions' },
           { label: 'Vouchers', hot: 'V', run: go('voucher', { type: 'sales' }) },
           { label: 'Day Book', hot: 'K', run: go('day-book') },
           { section: 'Utilities' },
-          ...(owner ? [{ label: 'Import from Tally', hot: 'I', run: go('import-tally') }] : []),
-          ...(owner ? [{ label: 'Backup', hot: 'U', run: go('backup') }] : []),
+          ...ownerOnly([{ label: 'Import from Tally', hot: 'I', run: go('import-tally') }]),
+          ...ownerOnly([{ label: 'Backup', hot: 'U', run: go('backup') }]),
           { section: 'Reports' },
-          ...(owner ? [{ label: 'Balance Sheet', hot: 'B', run: go('balance-sheet') }, { label: 'Profit & Loss A/c', hot: 'P', run: go('profit-loss') }] : []),
+          ...ownerOnly([{ label: 'Balance Sheet', hot: 'B', run: go('balance-sheet') }, { label: 'Profit & Loss A/c', hot: 'P', run: go('profit-loss') }]),
           { label: 'Stock Summary', hot: 'S', run: go('stock-summary') },
           { label: 'Outstandings', hot: 'O', run: go('outstanding', { kind: 'receivable' }) },
           { label: 'Alerts & Reminders', hot: 'L', run: go('alerts') },
           { label: 'GST Returns & e-Way Bills', hot: 'G', run: go('gst') },
           { label: 'Display More Reports', hot: 'D', run: go('reports-menu') },
-          ...(owner ? [{ gap: true as const }, { label: 'Company Settings', hot: 'Y', run: go('company') }] : []),
+          ...ownerOnly([{ gap: true as const }, { label: 'Company Settings', hot: 'Y', run: go('company') }]),
         ]}
       />
     </div>
@@ -119,13 +127,13 @@ export function AlterMenu() {
 
 export function ReportsMenu() {
   const nav = useNav();
-  const owner = isOwner(nav);
+  const ownerOnly = useOwnerOnly();
   const go = (name: string, props?: any) => () => nav.push({ name, props });
   return (
     <div style={{ padding: 24 }}>
       <Menu title="Display More Reports" entries={[
         { section: 'Accounts' },
-        ...(owner ? [{ label: 'Trial Balance', run: go('trial-balance') }] : []),
+        ...ownerOnly([{ label: 'Trial Balance', run: go('trial-balance') }]),
         { label: 'Day Book', hot: 'D', run: go('day-book') },
         { label: 'Ledger', hot: 'L', run: go('master-list', { kind: 'ledger', mode: 'report' }) },
         { label: 'Receivables (Outstandings)', hot: 'R', run: go('outstanding', { kind: 'receivable' }) },
@@ -134,7 +142,7 @@ export function ReportsMenu() {
         { label: 'Purchase Register', hot: 'U', run: go('register', { type: 'purchase' }) },
         { label: 'Sales by Beat / Salesman / Party', hot: 'B', run: go('sales-analysis') },
         { label: 'Post-dated Cheques', hot: 'Q', run: go('pdc') },
-        ...(owner ? [{ label: 'Bank Reconciliation', hot: 'K', run: go('bank-reco') }] : []),
+        ...ownerOnly([{ label: 'Bank Reconciliation', hot: 'K', run: go('bank-reco') }]),
         { section: 'Inventory' },
         { label: 'Stock Summary', hot: 'S', run: go('stock-summary') },
         { label: 'Godown Summary', hot: 'W', run: go('godown-stock') },
@@ -143,8 +151,8 @@ export function ReportsMenu() {
         { label: 'Orders and Notes Pending', hot: 'O', run: go('pending-orders', { kind: 'sales' }) },
         { section: 'Statutory' },
         { label: 'GST Returns & e-Way Bills', hot: 'G', run: go('gst') },
-        ...(owner ? [{ label: 'GSTR-2B Reconciliation', hot: '2', run: go('gstr2b') }, { label: 'TDS Register', hot: 'T', run: go('tds') }] : []),
-        ...(owner ? [{ label: 'Edit Log (Audit trail)', hot: 'A', run: go('audit') }] : []),
+        ...ownerOnly([{ label: 'GSTR-2B Reconciliation', hot: '2', run: go('gstr2b') }, { label: 'TDS Register', hot: 'T', run: go('tds') }]),
+        ...ownerOnly([{ label: 'Edit Log (Audit trail)', hot: 'A', run: go('audit') }]),
       ]} />
     </div>
   );
