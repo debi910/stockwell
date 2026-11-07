@@ -111,7 +111,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return payload;
   });
   app.get('/api/meta', async () => ({
-    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.4.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
+    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.4.1', godowns: books.godowns(), priceLevels: books.priceLevels(),
   }));
   // Every change to the books writes an edit-log row, so its newest id tells open screens on any PC that something changed.
   // Each open Stockwell asks every few seconds, which also tells the main PC how many PCs are working now.

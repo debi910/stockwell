@@ -145,18 +145,25 @@ export function groupTallyFiles(files: File[]): FileGroup[] {
 }
 
 type Job = { id: number; state: 'running' | 'done' | 'failed'; step: string; done: number; total: number; error?: string;
-  companies: { tally: string; id: string; name: string; masters?: any; vouchers?: any; error?: string }[] };
+  companies: { tally: string; id: string; name: string; masters?: any; vouchers?: any; error?: string; monthErrors?: string[] }[] };
 
-function ImportSummary({ masters, vouchers }: { masters?: any; vouchers?: any }) {
+function ImportSummary({ masters, vouchers, monthErrors }: { masters?: any; vouchers?: any; monthErrors?: string[] }) {
+  const notes: string[] = [...(masters?.skipped ?? []), ...(vouchers?.skipped ?? [])];
   return (
     <div className="subtle">
       {masters && <>Masters: {masters.ledgers} ledgers ({masters.bills ?? 0} pending bills), {masters.items} items, {masters.groups} groups, {masters.godowns ?? 0} godowns. </>}
-      {vouchers && <>Vouchers: {vouchers.vouchers} brought in{vouchers.already ? `, ${vouchers.already} were already here` : ''}{vouchers.from ? ` (${shortDate(vouchers.from)} to ${shortDate(vouchers.to)})` : ''}.
+      {vouchers && <>Vouchers: {vouchers.vouchers} brought in{vouchers.already ? `, ${vouchers.already} were already here` : ''}{vouchers.updated ? `, ${vouchers.updated} altered in Tally and updated` : ''}{vouchers.removed ? `, ${vouchers.removed} deleted in Tally and taken out` : ''}{vouchers.from ? ` (${shortDate(vouchers.from)} to ${shortDate(vouchers.to)})` : ''}.
         {Object.keys(vouchers.byType ?? {}).length > 0 && <> {Object.entries(vouchers.byType).map(([k, n]) => `${k} ${n}`).join(', ')}.</>}</>}
-      {[...(masters?.skipped ?? []), ...(vouchers?.skipped ?? [])].length > 0 && (
+      {monthErrors && monthErrors.length > 0 && (
+        <div role="alert" style={{ color: 'var(--bad)', marginTop: 4 }}>
+          {monthErrors.length} month{monthErrors.length > 1 ? 's' : ''} could not be brought in (the rest were). Import again to try {monthErrors.length > 1 ? 'them' : 'it'} again.
+          <ul>{monthErrors.slice(0, 50).map((s, i) => <li key={i}>{s}</li>)}</ul>
+        </div>
+      )}
+      {notes.length > 0 && (
         <details style={{ marginTop: 4 }}>
-          <summary style={{ color: 'var(--bad)' }}>{[...(masters?.skipped ?? []), ...(vouchers?.skipped ?? [])].length} not brought in. See why</summary>
-          <ul>{[...(masters?.skipped ?? []), ...(vouchers?.skipped ?? [])].slice(0, 200).map((s: string, i: number) => <li key={i}>{s}</li>)}</ul>
+          <summary style={{ color: 'var(--bad)' }}>{notes.length} to check (left out or changed). See the list</summary>
+          <ul>{notes.slice(0, 200).map((s: string, i: number) => <li key={i}>{s}</li>)}</ul>
         </details>
       )}
     </div>
@@ -278,7 +285,7 @@ export function ImportTally() {
           {job.companies.map((c) => (
             <div key={c.tally} style={{ marginTop: 8 }}>
               <b>{c.name}</b>{c.id && <span className="subtle"> · folder {c.id}</span>}
-              {c.error ? <div className="hint" style={{ color: 'var(--bad)' }}>{c.error}</div> : <ImportSummary masters={c.masters} vouchers={c.vouchers} />}
+              {c.error ? <div className="hint" style={{ color: 'var(--bad)' }}>{c.error}</div> : <ImportSummary masters={c.masters} vouchers={c.vouchers} monthErrors={c.monthErrors} />}
               {job.state !== 'running' && c.id && !c.error && into === 'new' && <button className="btn" style={{ marginTop: 4 }} onClick={() => nav.openCompany(c.id)}>Open this company</button>}
             </div>
           ))}

@@ -6,6 +6,11 @@ import path from 'node:path';
 import type { Books } from './books';
 import { VOUCHER_TYPES, type VoucherType } from './books';
 import { STATES } from '../core/gst';
+import { PL_LEDGER } from './tally';
+
+/** Stockwell's ledger for last years' result is Tally's own predefined "Profit & Loss A/c". */
+const tallyLedgerName = (n: string) => (n === PL_LEDGER ? 'Profit & Loss A/c' : n);
+const QTY_UQC = new Set(['KGS', 'LTR', 'MTR', 'GMS', 'MLT', 'TON', 'QTL', 'SQM', 'SQF', 'CBM', 'KLR', 'MTS', 'YDS', 'CMS', 'CCM']);
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
 const tag = (name: string, value: unknown) => `<${name}>${esc(value)}</${name}>`;
@@ -35,8 +40,13 @@ export function tallyMastersXml(books: Books): string {
   const groups = db.prepare(`SELECT g.name, p.name AS parent FROM groups g LEFT JOIN groups p ON p.id=g.parent_id WHERE g.builtin=0 ORDER BY g.id`).all() as { name: string; parent: string | null }[];
   for (const g of groups) parts.push(msg(`<GROUP NAME="${esc(g.name)}">${tag('NAME', g.name)}${tag('PARENT', g.parent ?? '')}</GROUP>`));
 
-  for (const u of db.prepare(`SELECT symbol FROM units ORDER BY id`).all() as { symbol: string }[]) {
-    parts.push(msg(`<UNIT NAME="${esc(u.symbol)}">${tag('NAME', u.symbol)}<ISSIMPLEUNIT>Yes</ISSIMPLEUNIT></UNIT>`));
+  // Decimal places: Tally rounds quantities to the unit's places, so a unit that is ever used in parts gets 3.
+  const fractional = db.prepare(`SELECT 1 FROM items i WHERE i.unit_id=? AND (i.opening_qty<>ROUND(i.opening_qty) OR EXISTS
+    (SELECT 1 FROM inventory iv WHERE iv.item_id=i.id AND (iv.qty<>ROUND(iv.qty) OR iv.free_qty<>ROUND(iv.free_qty)))) LIMIT 1`);
+  for (const u of db.prepare(`SELECT id, symbol, name, uqc FROM units ORDER BY id`).all() as { id: number; symbol: string; name: string; uqc: string }[]) {
+    const places = QTY_UQC.has(u.uqc) || fractional.get(u.id) ? 3 : 0;
+    parts.push(msg(`<UNIT NAME="${esc(u.symbol)}">${tag('NAME', u.symbol)}${u.name && u.name !== u.symbol ? tag('ORIGINALNAME', u.name) : ''}` +
+      `<ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>${tag('DECIMALPLACES', places)}</UNIT>`));
   }
   for (const g of db.prepare(`SELECT name FROM stock_groups ORDER BY id`).all() as { name: string }[]) {
     parts.push(msg(`<STOCKGROUP NAME="${esc(g.name)}">${tag('NAME', g.name)}<PARENT></PARENT></STOCKGROUP>`));
@@ -45,6 +55,7 @@ export function tallyMastersXml(books: Books): string {
     parts.push(msg(`<GODOWN NAME="${esc(g.name)}">${tag('NAME', g.name)}</GODOWN>`));
   }
 
+  const booksFrom = books.company().books_from;
   const ledgers = db.prepare(`SELECT l.*, g.name AS grp FROM ledgers l JOIN groups g ON g.id=l.group_id ORDER BY l.id`).all() as Record<string, any>[];
   const openBills = db.prepare(`SELECT ref, amount, date, due_date FROM bills WHERE ledger_id=? AND voucher_id IS NULL ORDER BY date, id`);
   for (const l of ledgers) {
@@ -52,30 +63,50 @@ export function tallyMastersXml(books: Books): string {
     const billWise = books.isBillWise(l.id);
     const bills = billWise ? (openBills.all(l.id) as { ref: string; amount: number; date: string; due_date: string }[]) : [];
     const addr = String(l.address ?? '').split(/\r?\n/).filter(Boolean).map((a) => tag('ADDRESS', a)).join('');
-    parts.push(msg(`<LEDGER NAME="${esc(l.name)}">${tag('NAME', l.name)}${tag('PARENT', l.grp)}` +
+    const state = l.state_code && STATES[l.state_code] ? STATES[l.state_code] : '';
+    const name = tallyLedgerName(l.name);
+    // TallyPrime 3.0+ keeps GSTIN and address in dated lists; the flat tags are kept too for older releases.
+    const dated = (l.gstin ? `<LEDGSTREGDETAILS.LIST>${tag('APPLICABLEFROM', tdate(booksFrom))}<GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>${tag('GSTIN', l.gstin)}` +
+        (state ? tag('STATE', state) : '') + `</LEDGSTREGDETAILS.LIST>` : '') +
+      (addr || state || l.pincode ? `<LEDMAILINGDETAILS.LIST>${tag('APPLICABLEFROM', tdate(booksFrom))}${tag('MAILINGNAME', name)}` +
+        (addr ? `<ADDRESS.LIST TYPE="String">${addr}</ADDRESS.LIST>` : '') + (state ? tag('STATE', state) : '') + (l.pincode ? tag('PINCODE', l.pincode) : '') +
+        `<COUNTRY>India</COUNTRY></LEDMAILINGDETAILS.LIST>` : '');
+    parts.push(msg(`<LEDGER NAME="${esc(name)}">${tag('NAME', name)}${name === l.name ? tag('PARENT', l.grp) : ''}` +
       `${tag('OPENINGBALANCE', tamt(l.opening))}${tag('ISBILLWISEON', yesNo(billWise))}` +
       (l.credit_days ? tag('BILLCREDITPERIOD', `${l.credit_days} Days`) : '') +
       (l.gstin ? `${tag('PARTYGSTIN', l.gstin)}<GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>` : '') +
-      (l.state_code && STATES[l.state_code] ? tag('LEDSTATENAME', STATES[l.state_code]) : '') +
+      (state ? tag('LEDSTATENAME', state) : '') +
       (addr ? `<ADDRESS.LIST TYPE="String">${addr}</ADDRESS.LIST>` : '') +
       (l.pincode ? tag('PINCODE', l.pincode) : '') + (l.phone ? tag('LEDGERMOBILE', l.phone) : '') +
       (head ? `<TAXTYPE>GST</TAXTYPE>${tag('GSTDUTYHEAD', head)}` : '') +
       bills.map((b) => `<BILLALLOCATIONS.LIST>${tag('NAME', b.ref)}${tag('BILLDATE', tdate(b.date))}${tag('OPENINGBALANCE', tamt(b.amount))}</BILLALLOCATIONS.LIST>`).join('') +
-      `</LEDGER>`));
+      dated + `</LEDGER>`));
   }
 
   const items = db.prepare(`SELECT i.*, u.symbol AS unit, sg.name AS sgroup FROM items i JOIN units u ON u.id=i.unit_id LEFT JOIN stock_groups sg ON sg.id=i.stock_group_id ORDER BY i.id`).all() as Record<string, any>[];
   const itemBatches = db.prepare(`SELECT batch_no, expiry_date, mfg_date, opening_qty FROM batches WHERE item_id=? AND opening_qty<>0`);
+  const anyDates = db.prepare(`SELECT MAX(mfg_date IS NOT NULL) mfg, MAX(expiry_date IS NOT NULL) exp FROM batches WHERE item_id=?`);
+  const rateHistory = db.prepare(`SELECT from_date, gst_rate FROM item_gst_rates WHERE item_id=? ORDER BY from_date`);
+  const TAXABILITY: Record<string, string> = { taxable: 'Taxable', nil: 'Nil Rated', exempt: 'Exempt', nongst: 'Non-GST' };
+  const gstDetails = (hsn: string, taxability: string, from: string, rate: number) =>
+    `<GSTDETAILS.LIST>${tag('APPLICABLEFROM', tdate(from))}<CALCULATIONTYPE>On Value</CALCULATIONTYPE>${tag('HSNCODE', hsn ?? '')}${tag('TAXABILITY', TAXABILITY[taxability] ?? 'Taxable')}` +
+    `<STATEWISEDETAILS.LIST><STATENAME>&#4; Any</STATENAME>` +
+    `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>Central Tax</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>${tag('GSTRATE', rate / 2)}</RATEDETAILS.LIST>` +
+    `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>State Tax</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>${tag('GSTRATE', rate / 2)}</RATEDETAILS.LIST>` +
+    `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>Integrated Tax</GSTRATEDUTYHEAD><GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>${tag('GSTRATE', rate)}</RATEDETAILS.LIST>` +
+    `</STATEWISEDETAILS.LIST></GSTDETAILS.LIST>`;
   for (const i of items) {
     const rate = i.opening_qty ? Math.round(i.opening_value / i.opening_qty) : 0;
     const batches = i.track_batch ? (itemBatches.all(i.id) as { batch_no: string; expiry_date: string | null; mfg_date: string | null; opening_qty: number }[]) : [];
+    // Rate changes are written as dated GST details, as Tally keeps them; the rate on the item applies from the books start.
+    const history = rateHistory.all(i.id) as { from_date: string; gst_rate: number }[];
+    const before = history.filter((h) => h.from_date <= booksFrom).at(-1);
+    const gstBlock = [{ from_date: booksFrom, gst_rate: before ? before.gst_rate : i.gst_rate },
+      ...history.filter((h) => h.from_date > booksFrom)].map((h) => gstDetails(i.hsn, i.taxability, h.from_date, h.gst_rate)).join('');
+    const d = i.track_batch ? (anyDates.get(i.id) as { mfg: number | null; exp: number | null }) : { mfg: 0, exp: 0 };
+    const batchSwitches = i.track_batch ? `<ISBATCHWISEON>Yes</ISBATCHWISEON>${tag('HASMFGDATE', yesNo(d.mfg))}${tag('ISPERISHABLEON', yesNo(d.exp))}` : '';
     parts.push(msg(`<STOCKITEM NAME="${esc(i.name)}">${tag('NAME', i.name)}${tag('PARENT', i.sgroup ?? '')}${tag('BASEUNITS', i.unit)}` +
-      `<GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE><GSTDETAILS.LIST>${tag('HSNCODE', i.hsn ?? '')}<TAXABILITY>Taxable</TAXABILITY>` +
-      `<STATEWISEDETAILS.LIST><STATENAME>&#4; Any</STATENAME>` +
-      `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>Central Tax</GSTRATEDUTYHEAD>${tag('GSTRATE', i.gst_rate / 2)}</RATEDETAILS.LIST>` +
-      `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>State Tax</GSTRATEDUTYHEAD>${tag('GSTRATE', i.gst_rate / 2)}</RATEDETAILS.LIST>` +
-      `<RATEDETAILS.LIST><GSTRATEDUTYHEAD>Integrated Tax</GSTRATEDUTYHEAD>${tag('GSTRATE', i.gst_rate)}</RATEDETAILS.LIST>` +
-      `</STATEWISEDETAILS.LIST></GSTDETAILS.LIST>` +
+      `<GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>${gstBlock}${batchSwitches}` +
       `${tag('OPENINGBALANCE', qtyText(i.opening_qty, i.unit))}${tag('OPENINGVALUE', tamt(i.opening_value))}${tag('OPENINGRATE', `${rupees(rate)}/${i.unit}`)}` +
       batches.map((b) => `<BATCHALLOCATIONS.LIST><GODOWNNAME>Main Location</GODOWNNAME>${tag('BATCHNAME', b.batch_no)}` +
         (b.mfg_date ? tag('MFDON', tdate(b.mfg_date)) : '') + (b.expiry_date ? tag('EXPIRYPERIOD', tdate(b.expiry_date)) : '') +
@@ -116,29 +147,39 @@ export function tallyDayBookXml(books: Books, from = '0000-01-01', to = '9999-12
       if (shares.length) shares[shares.length - 1] += accountEntry.amount - shares.reduce((a, s) => a + s, 0);
     }
     const kindName = (k: string) => (k === 'agst' ? 'Agst Ref' : k === 'onacc' ? 'On Account' : 'New Ref');
+    // An invoice lists its party and tax ledgers as LEDGERENTRIES (Tally's invoice layout); other vouchers as ALLLEDGERENTRIES.
+    const ledgerList = invoice ? 'LEDGERENTRIES.LIST' : 'ALLLEDGERENTRIES.LIST';
     const ledgerXml = rest.map((e) => {
       const bl = bills.filter((b) => b.ledger_id === e.ledger_id);
-      return `<ALLLEDGERENTRIES.LIST>${tag('LEDGERNAME', e.name)}${tag('ISDEEMEDPOSITIVE', yesNo(e.amount > 0))}${tag('AMOUNT', tamt(e.amount))}` +
+      return `<${ledgerList}>${tag('LEDGERNAME', tallyLedgerName(e.name))}${tag('ISDEEMEDPOSITIVE', yesNo(e.amount > 0))}` +
+        (e.ledger_id === v.party_id ? '<ISPARTYLEDGER>Yes</ISPARTYLEDGER>' : '') + tag('AMOUNT', tamt(e.amount)) +
         bl.map((b) => `<BILLALLOCATIONS.LIST>${tag('NAME', b.ref)}${tag('BILLTYPE', kindName(b.kind))}${tag('AMOUNT', tamt(b.amount))}</BILLALLOCATIONS.LIST>`).join('') +
-        `</ALLLEDGERENTRIES.LIST>`;
+        `</${ledgerList}>`;
     }).join('');
+    // A delivery or receipt note is tracked by its own number; the invoice made against it carries the same number.
+    const note = v.type === 'delivery_note' || v.type === 'receipt_note';
     const lineXml = lines.map((l, i) => {
       const inward = Number(l.direction) > 0 || (Number(l.direction) === 0 && vt.move > 0);
       const amt = Number(l.taxable);
       const q = qtyText(Number(l.qty) + Number(l.free_qty || 0), l.unit);
-      const tracking = Number(l.direction) === 0 && against && vt.books ? tag('TRACKINGNUMBER', against) : '';
+      const tracking = note ? tag('TRACKINGNUMBER', v.number) : Number(l.direction) === 0 && against && vt.books ? tag('TRACKINGNUMBER', against) : '';
       const batch = `<BATCHALLOCATIONS.LIST>${tag('GODOWNNAME', l.godown ?? 'Main Location')}${tag('BATCHNAME', l.batch_no ?? 'Primary Batch')}` +
         (l.expiry_date ? tag('EXPIRYPERIOD', tdate(l.expiry_date)) : '') + tracking +
         `${tag('AMOUNT', inward ? tamt(amt) : rupees(amt))}${tag('ACTUALQTY', q)}${tag('BILLEDQTY', qtyText(Number(l.qty), l.unit))}</BATCHALLOCATIONS.LIST>`;
-      const acc = accountEntry ? `<ACCOUNTINGALLOCATIONS.LIST>${tag('LEDGERNAME', accountEntry.name)}${tag('ISDEEMEDPOSITIVE', yesNo(shares[i] > 0))}${tag('AMOUNT', tamt(shares[i]))}</ACCOUNTINGALLOCATIONS.LIST>` : '';
+      const acc = accountEntry ? `<ACCOUNTINGALLOCATIONS.LIST>${tag('LEDGERNAME', tallyLedgerName(accountEntry.name))}${tag('ISDEEMEDPOSITIVE', yesNo(shares[i] > 0))}${tag('AMOUNT', tamt(shares[i]))}</ACCOUNTINGALLOCATIONS.LIST>` : '';
       const listName = stockOnly ? (inward ? 'INVENTORYENTRIESIN.LIST' : 'INVENTORYENTRIESOUT.LIST') : 'ALLINVENTORYENTRIES.LIST';
       return `<${listName}>${tag('STOCKITEMNAME', l.item)}${tag('ISDEEMEDPOSITIVE', yesNo(inward))}${tag('RATE', `${rupees(Number(l.rate))}/${l.unit}`)}` +
         (Number(l.discount_pct) ? tag('DISCOUNT', l.discount_pct) : '') +
         `${tag('AMOUNT', inward ? tamt(amt) : rupees(amt))}${tag('ACTUALQTY', q)}${tag('BILLEDQTY', qtyText(Number(l.qty), l.unit))}${batch}${acc}</${listName}>`;
     }).join('');
-    const guid = v.tally_id || `stockwell-${books.company().name.replace(/[^A-Za-z0-9]/g, '').slice(0, 20)}-${v.id}`;
-    out.push(msg(`<VOUCHER VCHTYPE="${esc(tType)}" ACTION="Create" OBJVIEW="${invoice ? 'Invoice Voucher View' : 'Accounting Voucher View'}">` +
-      `${tag('DATE', tdate(v.date))}${tag('GUID', guid)}${tag('VOUCHERTYPENAME', tType)}${tag('VOUCHERNUMBER', v.number)}` +
+    // REMOTEID identifies the voucher on import without claiming one of Tally's own GUIDs.
+    const remote = v.tally_id || `stockwell-${books.company().name.replace(/[^A-Za-z0-9]/g, '').slice(0, 20)}-${v.id}`;
+    const view = invoice ? 'Invoice Voucher View' : 'Accounting Voucher View';
+    const head = `<VOUCHER REMOTEID="${esc(remote)}" VCHTYPE="${esc(tType)}" ACTION="Create" OBJVIEW="${view}">` +
+      `${tag('DATE', tdate(v.date))}${tag('VOUCHERTYPENAME', tType)}${tag('VOUCHERNUMBER', v.number)}`;
+    // Tally keeps no details of a cancelled voucher, only its number and date.
+    if (v.cancelled) { out.push(msg(`${head}${v.narration ? tag('NARRATION', v.narration) : ''}<ISCANCELLED>Yes</ISCANCELLED></VOUCHER>`)); continue; }
+    out.push(msg(head + `${tag('PERSISTEDVIEW', view)}` +
       (v.party ? tag('PARTYLEDGERNAME', v.party) : '') + (v.narration ? tag('NARRATION', v.narration) : '') +
       (v.ref_no ? tag('REFERENCE', v.ref_no) : '') + (v.ref_date ? tag('REFERENCEDATE', tdate(v.ref_date)) : '') +
       (v.party_gstin ? tag('PARTYGSTIN', v.party_gstin) : '') + (v.place_of_supply && STATES[v.place_of_supply] ? tag('PLACEOFSUPPLY', STATES[v.place_of_supply]) : '') +

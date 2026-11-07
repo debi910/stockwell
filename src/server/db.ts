@@ -313,6 +313,7 @@ function migrate(db: DB) {
   // ---- v0.4: brought in from TallyPrime ----
   add('vouchers', 'tally_id', 'TEXT DEFAULT NULL'); // the voucher's GUID in Tally, so importing again skips it
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_tally_id ON vouchers(tally_id) WHERE tally_id IS NOT NULL`);
+  add('vouchers', 'tally_alter', 'INTEGER DEFAULT NULL'); // Tally's ALTERID when it came in; a higher one means it was altered there
   db.exec(`
     CREATE TABLE IF NOT EXISTS salesmen (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, phone TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '',

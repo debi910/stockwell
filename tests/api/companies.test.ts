@@ -267,17 +267,26 @@ describe('straight from TallyPrime', () => {
   let tally: http.Server;
   let url: string;
   const asked: string[] = [];
+  let brokenMonth = '';
+  let dropMay = false;
   beforeEach(async () => {
     asked.length = 0;
+    brokenMonth = '';
+    dropMay = false;
     tally = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (d) => { body += d; });
+      const chunks: Buffer[] = [];
+      req.on('data', (d) => { chunks.push(d); });
       req.on('end', () => {
+        // Stockwell asks in UTF-16, as Tally's own tools do.
+        expect(req.headers['content-type']).toMatch(/utf-16/);
+        const body = Buffer.concat(chunks).toString('utf16le');
         asked.push(body);
         const send = (x: string) => { res.writeHead(200, { 'Content-Type': 'text/xml' }); res.end(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(x, 'utf16le')])); };
         if (body.includes('Stockwell Companies')) return send(`<ENVELOPE><BODY><DATA><COLLECTION><COMPANY NAME="KNOPFFSOLUTION ( TELECOM SECTOR)"><NAME>KNOPFFSOLUTION ( TELECOM SECTOR)</NAME><BOOKSFROM>20240401</BOOKSFROM></COMPANY><COMPANY NAME="CEMECH PAINT'S"><BOOKSFROM>20240401</BOOKSFROM></COMPANY></COLLECTION></DATA></BODY></ENVELOPE>`);
         if (body.includes('List of Accounts')) return send(TALLY_MASTERS);
         if (body.includes('Day Book')) {
+          if (brokenMonth && body.includes(`<SVFROMDATE>${brokenMonth}</SVFROMDATE>`)) { res.writeHead(500); return res.end(); }
+          if (dropMay && body.includes('<SVFROMDATE>20240501</SVFROMDATE>')) return send(dayBook(''));
           if (body.includes('<SVFROMDATE>20240401</SVFROMDATE>')) return send(dayBook(tallySale('g-1', 'KS/1', '20240415') + tallyReceipt('g-2', 'KS/1', '20240420')));
           if (body.includes('<SVFROMDATE>20240501</SVFROMDATE>')) return send(dayBook(tallySale('g-3', 'KS/2', '20240505')));
           return send(dayBook(''));
@@ -317,6 +326,27 @@ describe('straight from TallyPrime', () => {
     expect((await k<any[]>('GET', '/api/ledgers')).find((l) => l.name === 'Bhoi Telecom').balance).toBe(393300 * 2 - 200000);
   });
 
+  it('carries on after a month that fails, and a catch-up brings that month, altered and deleted vouchers across', async () => {
+    const c = callIn('100000');
+    brokenMonth = '20240401';
+    const first = await waitFor(c, (await c('POST', '/api/tally/import', { url, companies: ['KNOPFFSOLUTION ( TELECOM SECTOR)'], into: 'new' })).id);
+    expect(first.state).toBe('done');
+    expect(first.companies[0].monthErrors).toEqual([expect.stringMatching(/^2024-04: Tally replied with an error \(HTTP 500\)/)]);
+    expect(first.companies[0].vouchers).toMatchObject({ vouchers: 1 });
+    // Months to the end of this financial year are asked for, so post-dated vouchers come too.
+    expect(asked.some((b) => b.includes('<SVTODATE>20270331</SVTODATE>'))).toBe(true);
+    brokenMonth = '';
+    const k = callIn(first.companies[0].id);
+    const again = await waitFor(k, (await k('POST', '/api/tally/import', { url, companies: ['KNOPFFSOLUTION ( TELECOM SECTOR)'], into: 'current' })).id);
+    expect(again.companies[0]).toMatchObject({ vouchers: { vouchers: 2, already: 1, removed: 0 } });
+    expect(again.companies[0].monthErrors).toBeUndefined();
+    // KS/2 of May is deleted in Tally: the next catch-up takes it out here too.
+    dropMay = true;
+    const third = await waitFor(k, (await k('POST', '/api/tally/import', { url, companies: ['KNOPFFSOLUTION ( TELECOM SECTOR)'], into: 'current' })).id);
+    expect(third.companies[0].vouchers).toMatchObject({ vouchers: 0, already: 2, removed: 1 });
+    expect((await k<any[]>('GET', '/api/ledgers')).find((l) => l.name === 'Bhoi Telecom').balance).toBe(393300 - 200000);
+  });
+
   it('says which company is not open in Tally', async () => {
     const c = callIn('100000');
     const job = await waitFor(c, (await c('POST', '/api/tally/import', { url, companies: ['Weighing Scale'], into: 'new' })).id);
@@ -336,7 +366,8 @@ describe('Tally voucher types', () => {
     expect(stockwellType('B2B Bill', 'B2B Bill', parents)).toBe('sales');
     expect(stockwellType('GST Sales 2024', 'GST Sales 2024', new Map())).toBe('sales');
     expect(stockwellType('Purchase Return (Debit Note)', 'x', new Map())).toBe('debit_note');
-    expect(stockwellType('Payroll', 'Payroll', new Map())).toBe('skip');
+    expect(stockwellType('Payroll', 'Payroll', new Map())).toBe('journal');
+    expect(stockwellType('Attendance', 'Attendance', new Map())).toBe('skip');
     expect(stockwellType('Something odd', 'Something odd', new Map())).toBeNull();
   });
 });
