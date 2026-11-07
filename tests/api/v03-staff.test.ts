@@ -42,12 +42,30 @@ describe('opening stock with its own "as on" date', () => {
   it('refuses a later opening date when goods were already sold before it', async () => {
     await sale(m.ramesh.id, '2026-10-16', 5);
     await expect(ctx.call('PUT', `/api/items/${m.ghee.id}`, { opening_date: '2026-10-20' })).rejects.toThrow(/below zero/);
-    await expect(ctx.call('PUT', `/api/items/${m.ghee.id}`, { opening_date: '2026-03-01' })).rejects.toThrow(/before the books start/);
     await expect(ctx.call('PUT', `/api/items/${m.ghee.id}`, { opening_date: '31-31-26' })).rejects.toThrow();
     // Blank (or the books start) means "from the start".
     const it = await ctx.call('PUT', `/api/items/${m.ghee.id}`, { opening_date: '' });
     expect(it.opening_date).toBeNull();
     expect(await stockOn('Patanjali Cow Ghee 1L', '2026-05-01')).toBe(20);
+  });
+
+  it('takes a back date (stock counted before the books start) and counts it from the start', async () => {
+    const it = await ctx.call<any>('PUT', `/api/items/${m.ghee.id}`, { opening_date: '2026-03-31' });
+    expect(it.opening_date).toBe('2026-03-31');
+    expect(await stockOn('Patanjali Cow Ghee 1L', '2026-04-01')).toBe(20);
+    await sale(m.ramesh.id, '2026-04-02', 5);
+    const apr = (await ctx.call<any[]>('GET', '/api/reports/stock-summary?from=2026-04-01&asOf=2026-04-30')).find((s) => s.name === 'Patanjali Cow Ghee 1L');
+    expect(apr).toMatchObject({ opening_qty: 20, inward: 0, outward: 5, closing_qty: 15 });
+    const pl = await ctx.call<any>('GET', '/api/reports/profit-loss?from=2026-04-01&to=2026-04-30');
+    expect(pl.openingStock).toBe(20 * 50000);
+    expect(pl.grossProfit).toBe(5 * 10000);
+    const bs = await ctx.call<any>('GET', '/api/reports/balance-sheet?asOf=2026-04-30');
+    expect(bs.totalAssets).toBe(bs.totalLiabilities);
+    const tb = await ctx.call<any>('GET', '/api/reports/trial-balance?asOf=2026-04-30');
+    expect(tb.totalDr - tb.totalCr).toBe(tb.openingDiff);
+    // The books start date itself is stored as "from the start"; a date far ahead is refused.
+    expect((await ctx.call<any>('PUT', `/api/items/${m.ghee.id}`, { opening_date: '2026-04-01' })).opening_date).toBeNull();
+    await expect(ctx.call('PUT', `/api/items/${m.ghee.id}`, { opening_date: '2030-01-01' })).rejects.toThrow(/too far ahead/);
   });
 
   it('keeps profit right and the Balance Sheet and Trial Balance balanced around the date', async () => {

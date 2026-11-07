@@ -208,8 +208,8 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
   const [it, setIt] = useState<any>({ name: initialName ?? '', gst_rate: 18, track_batch: 0, opening_qty: 0, opening_value: 0 });
   const [money, setMoney] = useState({ mrp: '', sale_rate: '', purchase_rate: '', opening_rate: '' });
   const [batch, setBatch] = useState({ no: '', expiry: '' });
-  // Opening stock "as on" date; blank = the books start date.
-  const [openDate, setOpenDate] = useState('');
+  // Opening stock "as on" date: the books start date unless changed; an earlier date back-dates it.
+  const [openDate, setOpenDate] = useState(() => shortDate(nav.company.books_from));
   const [prices, setPrices] = useState<Record<string, string>>({});
   const [newRate, setNewRate] = useState({ rate: '', from: '' });
   const levels: string[] = String(nav.company.price_levels ?? '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -222,7 +222,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
       setIt(x);
       setMoney({ mrp: rupeesText(x.mrp), sale_rate: rupeesText(x.sale_rate), purchase_rate: rupeesText(x.purchase_rate), opening_rate: x.opening_qty ? rupeesText(Math.round(x.opening_value / x.opening_qty)) : '' });
       setPrices(Object.fromEntries(Object.entries(x.prices ?? {}).map(([k, v]) => [k, rupeesText(v as number)])));
-      setOpenDate(x.opening_date ? shortDate(x.opening_date) : '');
+      setOpenDate(shortDate(x.opening_date ?? nav.company.books_from));
     });
   }, [id]);
   const set = (k: string) => (v: any) => setIt((x: any) => ({ ...x, [k]: v }));
@@ -232,7 +232,7 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
   const save = async () => {
     try {
       const od = openDate.trim() ? parseDate(openDate, nav.workDate) : null;
-      if (openDate.trim() && !od) { nav.toast(`"${openDate}" is not a date. Type it like 1-11-26, or leave it blank for the books start date.`, true); return; }
+      if (openDate.trim() && !od) { nav.toast(`"${openDate}" is not a date. Type it like 1-11-26, or leave it blank for the books start date (${shortDate(nav.company.books_from)}).`, true); return; }
       const body = {
         ...it, opening_date: od, gst_rate: Number(it.gst_rate) || 0, reorder_level: Number(it.reorder_level) || 0,
         scheme_buy: Number(it.scheme_buy) || 0, scheme_free: Number(it.scheme_free) || 0,
@@ -309,8 +309,9 @@ export function ItemForm({ id, name: initialName, onSaved }: { id?: number; name
         <Row label="Rate"><Text name="Opening rate" num value={money.opening_rate} onChange={m('opening_rate')} /></Row>
         <Row label="Value"><span className="num">{formatINR(openingValue)}</span></Row>
         <Row label="As on date">
-          <Text name="Opening stock date" value={openDate} onChange={setOpenDate} placeholder={`blank = ${shortDate(nav.company.books_from)} (books start)`}
+          <Text name="Opening stock date" value={openDate} onChange={setOpenDate} placeholder={`${shortDate(nav.company.books_from)} (books start)`}
             onBlur={() => { const d = parseDate(openDate, nav.workDate); if (openDate.trim() && d) setOpenDate(shortDate(d)); }} />
+          <span className="hint"> books start by default; type an earlier date to back-date it</span>
         </Row>
         {!id && !!it.track_batch && <>
           <Row label="Opening batch no."><Text name="Opening batch" value={batch.no} onChange={(v) => setBatch((b) => ({ ...b, no: v }))} /></Row>

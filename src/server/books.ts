@@ -657,13 +657,14 @@ export class Books {
       if (i[k] !== undefined && i[k] !== null && Number(i[k]) > (qtyField ? 1e7 : 1e13)) fail(`That ${qtyField ? 'quantity' : 'amount'} is too large.`);
     }
     if (i.opening_value !== undefined && i.opening_value !== null) i.opening_value = Math.round(Number(i.opening_value));
-    // The date the opening stock was counted. Blank = the books start date. Stock before it does not include it.
+    // The date the opening stock was counted. Blank (or the books start) = the books start date. A back date
+    // (stock counted before the books start, e.g. at the last Tally year end) is kept as typed and counts from the
+    // books start, since nothing comes before it. A later date: stock before it does not include it.
     if (i.opening_date !== undefined) {
       if (i.opening_date !== null && typeof i.opening_date !== 'string') fail('The opening stock date must be a date.');
       const d = isoDate(i.opening_date, 'The opening stock date');
-      const from = this.company().books_from;
-      if (d && d < from) fail(`The opening stock date cannot be before the books start on ${shortDate(from)}.`);
-      i.opening_date = d && d > from ? d : null;
+      if (d && d > addDays(todayISO(), 366)) fail(`The opening stock date ${shortDate(d)} is too far ahead.`);
+      i.opening_date = d && d !== this.company().books_from ? d : null;
     }
     if (i.unit_id !== undefined && !this.db.prepare(`SELECT 1 FROM units WHERE id=?`).get(i.unit_id)) fail('Choose a unit for the item.');
     if (i.alt_unit_id) {
