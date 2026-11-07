@@ -146,7 +146,7 @@ export class Users {
 }
 
 /** Requests anyone may make without logging in. */
-const OPEN = ['/api/meta', '/api/session', '/api/login'];
+const OPEN = ['/api/meta', '/api/session', '/api/login', '/api/companies/list'];
 
 /** What a Billing operator may not do. Checked on the server, so a changed screen cannot get around it.
  *  Matches the router's own route pattern (already decoded), never the raw URL, so %-encoding cannot slip past. */
@@ -164,7 +164,8 @@ function operatorBlocked(req: FastifyRequest, route: string, books: Books): stri
   }
   if (['/api/reports/profit-loss', '/api/reports/balance-sheet', '/api/reports/trial-balance'].includes(route)) return 'Only an Owner can see this report.';
   if (route === '/api/audit') return 'Only an Owner can see the edit log.';
-  if (route === '/api/import/tally') return 'Only an Owner can import data.';
+  if (route.startsWith('/api/import/') || route.startsWith('/api/tally/') || route.startsWith('/api/export/')) return 'Only an Owner can import or export data.';
+  if (m !== 'GET' && route.startsWith('/api/companies')) return 'Only an Owner can create a company.';
   if (route === '/api/backup') return 'Only an Owner can make a backup.';
   if (route === '/api/items/gst-rate' || route === '/api/items/:id/prices' || (m !== 'GET' && route.startsWith('/api/godowns/'))) return 'Only an Owner can change rates and godowns.';
   if (route === '/api/vouchers/:id/bounce' || route === '/api/vouchers/:id/bank-date') return 'Only an Owner can mark cheques and bank dates.';
@@ -185,8 +186,7 @@ function hostAllowed(host: string | undefined): boolean {
   return name === me || name === `${me}.local` || name === `${me}.lan`;
 }
 
-export function installAuth(app: FastifyInstance, books: Books): Users {
-  const users = new Users(books);
+export function installAuth(app: FastifyInstance, books: Books, users: Users = new Users(books)): Users {
   const tokenOf = (req: FastifyRequest) => {
     const t = req.headers['x-stockwell-token'];
     return typeof t === 'string' && t ? t : undefined;

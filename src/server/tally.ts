@@ -20,31 +20,86 @@ export function checkTallyUrl(raw: string): string {
   return u.toString();
 }
 
-export async function fetchTallyMasters(url = 'http://localhost:9000'): Promise<string> {
-  let res: Response;
-  try {
-    res = await fetch(checkTallyUrl(url), { method: 'POST', body: TALLY_MASTERS_REQUEST, headers: { 'Content-Type': 'text/xml' }, signal: AbortSignal.timeout(15000) });
-  } catch (e) {
-    if (e instanceof BooksError) throw e;
-    throw new BooksError('Could not reach Tally. Open TallyPrime with the company loaded, and turn on F1 > Settings > Connectivity > "TallyPrime acts as: Both" on port 9000.');
-  }
-  if (!res.ok) throw new Error(`Tally replied with HTTP ${res.status}.`);
-  return res.text();
+/** Text from Tally: its XML server and its export files may be UTF-8 or UTF-16 ("Unicode"). */
+export function decodeTally(buf: Uint8Array): string {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return new TextDecoder('utf-8').decode(buf.subarray(3));
+  // UTF-16 without its mark: every other byte of "<ENVELOPE" is zero.
+  if (buf.length > 3 && buf[1] === 0 && buf[3] === 0) return new TextDecoder('utf-16le').decode(buf);
+  return new TextDecoder('utf-8').decode(buf);
 }
 
-type Node = Record<string, any>;
+const xmlEscape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const companyVar = (company?: string) => (company ? `<SVCURRENTCOMPANY>${xmlEscape(company)}</SVCURRENTCOMPANY>` : '');
 
-const text = (v: unknown): string => {
+/** One request to TallyPrime's own server (F1 > Settings > Connectivity, port 9000). */
+export async function tallyPost(url: string, body: string, timeoutMs = 60_000): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(checkTallyUrl(url), { method: 'POST', body, headers: { 'Content-Type': 'text/xml;charset=utf-8' }, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    if (e instanceof BooksError) throw e;
+    if ((e as Error)?.name === 'TimeoutError') throw new BooksError('TallyPrime took too long to answer. Close other reports in Tally and try again.');
+    throw new BooksError('Could not reach Tally. Open TallyPrime with the company loaded, and turn on F1 > Settings > Connectivity > "TallyPrime acts as: Both" on port 9000.');
+  }
+  if (!res.ok) throw new BooksError(`Tally replied with an error (HTTP ${res.status}).`);
+  const xml = decodeTally(new Uint8Array(await res.arrayBuffer()));
+  const err = /<LINEERROR>([\s\S]*?)<\/LINEERROR>/i.exec(xml);
+  if (err) throw new BooksError(`Tally said: ${err[1].trim().slice(0, 200)}`);
+  return xml;
+}
+
+export async function fetchTallyMasters(url = 'http://localhost:9000', company?: string): Promise<string> {
+  return tallyPost(url, TALLY_MASTERS_REQUEST.replace('<SVEXPORTFORMAT>', `${companyVar(company)}<SVEXPORTFORMAT>`), 180_000);
+}
+
+/** The companies open in TallyPrime now, with the dates their books begin. */
+export async function fetchTallyCompanies(url = 'http://localhost:9000'): Promise<{ name: string; booksFrom: string | null; startingFrom: string | null }[]> {
+  const xml = await tallyPost(url, `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>Stockwell Companies</ID></HEADER>
+<BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE>
+<COLLECTION NAME="Stockwell Companies" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME, BOOKSFROM, STARTINGFROM</FETCH></COLLECTION>
+</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`, 30_000);
+  return parseTallyCompanies(xml);
+}
+
+export function parseTallyCompanies(xml: string) {
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false, trimValues: true });
+  let doc: unknown;
+  try { doc = parser.parse(xml); } catch { throw new BooksError('Tally sent a list of companies that could not be read.'); }
+  const out: { name: string; booksFrom: string | null; startingFrom: string | null }[] = [];
+  const walk = (n: unknown) => {
+    if (!n || typeof n !== 'object') return;
+    for (const [k, v] of Object.entries(n as Node)) {
+      if (k === 'COMPANY') for (const c of list(v)) { const name = nameOf(c); if (name && !out.some((o) => o.name === name)) out.push({ name, booksFrom: tallyDate(c.BOOKSFROM), startingFrom: tallyDate(c.STARTINGFROM) }); }
+      else if (typeof v === 'object') list(v).forEach(walk);
+    }
+  };
+  walk(doc);
+  return out;
+}
+
+/** All vouchers of a company between two dates, as Tally's Day Book export. */
+export async function fetchTallyVouchers(url: string, company: string | undefined, from: string, to: string): Promise<string> {
+  const d = (iso: string) => iso.replace(/-/g, '');
+  return tallyPost(url, `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC>
+<REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES>${companyVar(company)}<SVFROMDATE>${d(from)}</SVFROMDATE><SVTODATE>${d(to)}</SVTODATE>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`, 180_000);
+}
+
+export type Node = Record<string, any>;
+
+export const text = (v: unknown): string => {
   if (v === undefined || v === null) return '';
   if (typeof v === 'object') return text((v as Node)['#text']);
   return String(v).trim();
 };
-const list = (v: unknown): Node[] => (v === undefined ? [] : Array.isArray(v) ? v : [v]) as Node[];
-const nameOf = (n: Node) => text(n['@_NAME']) || text(n.NAME) || text(list(n['NAME.LIST'])[0]?.NAME);
+export const list = (v: unknown): Node[] => (v === undefined ? [] : Array.isArray(v) ? v : [v]) as Node[];
+export const nameOf = (n: Node) => text(n['@_NAME']) || text(n.NAME) || text(list(n['NAME.LIST'])[0]?.NAME);
 
 /** Tally writes debit amounts as negative numbers; Stockwell keeps debit as positive. */
-const tallyAmount = (v: unknown) => -toPaise(text(v).replace(/[^\d.-]/g, '') || '0');
-const firstNumber = (v: unknown) => Number((text(v).replace(/,/g, '').match(/-?[\d.]+/) ?? ['0'])[0]);
+export const tallyAmount = (v: unknown) => -toPaise(text(v).replace(/[^\d.-]/g, '') || '0');
+export const firstNumber = (v: unknown) => Number((text(v).replace(/,/g, '').match(/-?[\d.]+/) ?? ['0'])[0]);
 
 /** Tally dates: 20260401, 1-Apr-2026, 01-04-2026 or 2026-04-01 → YYYY-MM-DD (or null). */
 export function tallyDate(v: unknown): string | null {
@@ -66,7 +121,8 @@ export function tallyDate(v: unknown): string | null {
 
 export interface TallyMasters {
   groups: { name: string; parent: string }[];
-  ledgers: { name: string; parent: string; opening: number; gstin: string; state: string; address: string; pincode: string; phone: string; creditDays: number;
+  voucherTypes?: { name: string; parent: string }[];
+  ledgers: { name: string; parent: string; gstHead?: string; opening: number; gstin: string; state: string; address: string; pincode: string; phone: string; creditDays: number;
     bills: { ref: string; date: string | null; amount: number; creditDays: number }[] }[];
   units: string[];
   stockGroups: string[];
@@ -82,7 +138,7 @@ export function parseTallyMasters(xml: string): TallyMasters {
   }
   let doc: unknown;
   try { doc = parser.parse(xml); } catch { throw new BooksError('The Tally file could not be read. Export it again from TallyPrime as XML.'); }
-  const found: Record<string, Node[]> = { GROUP: [], LEDGER: [], UNIT: [], STOCKGROUP: [], STOCKITEM: [], GODOWN: [] };
+  const found: Record<string, Node[]> = { GROUP: [], LEDGER: [], UNIT: [], STOCKGROUP: [], STOCKITEM: [], GODOWN: [], VOUCHERTYPE: [] };
   const walk = (n: unknown) => {
     if (!n || typeof n !== 'object') return;
     for (const [k, v] of Object.entries(n as Node)) {
@@ -117,6 +173,7 @@ export function parseTallyMasters(xml: string): TallyMasters {
       return {
         name: nameOf(l),
         parent: text(l.PARENT),
+        gstHead: text(l.GSTDUTYHEAD),
         opening: tallyAmount(l.OPENINGBALANCE),
         gstin: (text(l.PARTYGSTIN) || text(reg.GSTIN)).toUpperCase(),
         state: text(l.LEDSTATENAME) || text(mail.STATE) || text(l.STATENAME),
@@ -146,6 +203,7 @@ export function parseTallyMasters(xml: string): TallyMasters {
       })).filter((b) => b.qty),
     })).filter((i) => i.name),
     godowns: found.GODOWN.map(nameOf).filter((n) => n && !/^main location$/i.test(n)),
+    voucherTypes: found.VOUCHERTYPE.map((v) => ({ name: nameOf(v), parent: text(v.PARENT) })).filter((v) => v.name),
   };
 }
 
@@ -170,8 +228,15 @@ export function importTallyMasters(books: Books, m: TallyMasters) {
     }
     pending.forEach((g) => result.skipped.push(`Group ${g.name} (parent ${g.parent} not found)`));
 
+    const unused = books.db.prepare(`SELECT 1 FROM entries WHERE ledger_id=? LIMIT 1`);
     for (const l of m.ledgers) {
-      if (books.ledgerByName(l.name) || /^profit & loss a\/c$/i.test(l.name)) continue;
+      const have = books.ledgerByName(l.name);
+      // A ledger Stockwell made itself (Cash, Sales…) takes Tally's opening balance while it is still unused.
+      if (have && !have.opening && l.opening && !unused.get(have.id) && !/^profit & loss a\/c$/i.test(l.name)) {
+        books.updateLedger(have.id, { opening: l.opening } as never);
+        result.ledgers++;
+      }
+      if (have || /^profit & loss a\/c$/i.test(l.name)) continue;
       const group = haveGroup(l.parent) ?? haveGroup('Suspense A/c')!;
       books.createLedger({
         name: l.name, group_id: group.id, opening: l.opening,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, desktop, openExternal, saveTextFile, setToken, getToken } from '../api';
+import { api, desktop, openExternal, saveTextFile, setToken, getToken, getCompany } from '../api';
 import { Row, Select, Text } from '../components/Field';
 import { confirmBox, promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
@@ -421,54 +421,6 @@ function EwbInput({ value, onSave }: { value: string | null; onSave: (v: string)
   );
 }
 
-// ---------------- Import from Tally ----------------
-export function ImportTally() {
-  const nav = useNav();
-  const [url, setUrl] = useState('http://localhost:9000');
-  const [xml, setXml] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  useTitle('Import from Tally');
-  const run = async (fromText: boolean) => {
-    setBusy(true);
-    try {
-      const r = await api.post('/api/import/tally', fromText ? { xml } : { url });
-      setResult(r);
-      nav.toast('Import finished');
-    } catch (e: any) { nav.toast(e.message, true); } finally { setBusy(false); }
-  };
-  const pickFile = (f: File | undefined) => f && f.text().then(setXml);
-  return (
-    <div className="form" data-form style={{ maxWidth: 760 }}>
-      <h2>Bring masters across from TallyPrime</h2>
-      <p className="hint" style={{ marginTop: 0 }}>Copies groups, ledgers (with GSTIN, address, opening balance and each pending bill with its date), units, stock groups, godowns and stock items (with each batch, its expiry and quantity). Names that already exist in Stockwell are skipped, so running it twice is safe.</p>
-      <p className="hint">Old vouchers stay in Tally for reference. The clean way to move is to start Stockwell's books on the 1st of a month (Company → Books begin from), with Tally's closing figures as the opening here.</p>
-      <div className="section-title" style={{ marginTop: 6 }}>Way 1: straight from Tally (Tally open on this PC)</div>
-      <ol className="steps">
-        <li>In TallyPrime press F1 (Help) → Settings → Connectivity, set "TallyPrime acts as" to Both and Port to 9000.</li>
-        <li>Open the company in Tally and keep it open.</li>
-      </ol>
-      <Row label="Tally address"><Text name="Tally address" value={url} onChange={setUrl} /></Row>
-      <div className="actions" style={{ justifyContent: 'flex-start' }}><button className="btn primary" disabled={busy} onClick={() => run(false)}>{busy ? 'Importing…' : 'Import from Tally'}</button></div>
-      <div className="section-title" style={{ marginTop: 14 }}>Way 2: from an exported file</div>
-      <ol className="steps">
-        <li>In Tally: Alt+E (Export) → Masters → Format XML (Data Interchange) → Export.</li>
-        <li>Choose that Master.xml file here.</li>
-      </ol>
-      <input type="file" accept=".xml,text/xml" aria-label="Tally XML file" onChange={(e) => pickFile(e.target.files?.[0])} />
-      {xml && <span className="subtle"> {Math.round(xml.length / 1024)} KB loaded</span>}
-      <div className="actions" style={{ justifyContent: 'flex-start' }}><button className="btn" disabled={busy || !xml} onClick={() => run(true)}>Import this file</button></div>
-      {result && (
-        <div className="panel" style={{ marginTop: 14, padding: 12 }}>
-          <b>Added:</b> {result.groups} groups, {result.ledgers} ledgers ({result.bills ?? 0} pending bills), {result.units} units, {result.stockGroups} stock groups, {result.godowns ?? 0} godowns, {result.items} items ({result.batches ?? 0} batches).
-          {result.skipped.length > 0 && <div className="subtle" style={{ marginTop: 6 }}>Skipped {result.skipped.length}: {result.skipped.slice(0, 12).join(', ')}{result.skipped.length > 12 ? '…' : ''}</div>}
-          <div className="subtle" style={{ marginTop: 6 }}>Next: check the Trial Balance (opening balances should match Tally's), then start billing.</div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ---------------- Backup ----------------
 export function BackupScreen() {
   const nav = useNav();
@@ -487,7 +439,13 @@ export function BackupScreen() {
     } catch (e: any) { nav.toast(e.message, true); } finally { setBusy(false); }
   }, [nav]);
   const restore = useCallback(async () => {
-    try { await desktop!.restore!(getToken()); } catch (e: any) { nav.toast(e.message?.replace(/^Error invoking remote method '\w+': (Error: )?/, '') ?? String(e), true); }
+    try {
+      if (await desktop!.restore!(getToken(), getCompany())) {
+        nav.toast('Backup restored');
+        window.dispatchEvent(new Event('stockwell:changed'));
+        await nav.refreshCompany();
+      }
+    } catch (e: any) { nav.toast(e.message?.replace(/^Error invoking remote method '\w+': (Error: )?/, '') ?? String(e), true); }
   }, []);
   useKeyBar([{ key: 'Ctrl+A', label: 'Back up now', run }], [run]);
   useScreenKeys((e) => { if (e.ctrlKey && e.key.toLowerCase() === 'a') { run(); return true; } return false; });
@@ -495,7 +453,7 @@ export function BackupScreen() {
   return (
     <div className="form" style={{ maxWidth: 640 }}>
       <h2>Backup</h2>
-      <Row label="Backup folder">{dir ? <b>{dir}</b> : <span className="tag warn">Not chosen. Set it in Company settings (F3).</span>}</Row>
+      <Row label="Backup folder">{dir ? <b>{dir}{nav.company.backup_subfolder ? `\\${nav.company.backup_subfolder}` : ''}</b> : <span className="tag warn">Not chosen. Set it in Company settings (F3).</span>}</Row>
       <Row label="Last backup">{nav.company.last_backup ? <b>{new Date(nav.company.last_backup).toLocaleString('en-IN')}</b> : <span className="tag warn">Never</span>}</Row>
       <Row label="Cloud folder">{nav.company.cloud_backup_dir ? <b>{nav.company.cloud_backup_dir}</b> : <span className="tag warn">Not set. Set it in Company settings (F3).</span>}</Row>
       {nav.company.cloud_backup_dir && <Row label="Last cloud backup">{nav.company.last_cloud_backup ? <b>{new Date(nav.company.last_cloud_backup).toLocaleString('en-IN')}</b> : <span className="tag warn">Never</span>}</Row>}
@@ -510,7 +468,7 @@ export function BackupScreen() {
       <div className="section-title" style={{ gridColumn: 'auto', marginTop: 16 }}>To restore</div>
       {desktop?.restore ? (
         <>
-          <p className="hint">Close Stockwell on the second PC first. Restoring replaces today's books with the backup. The current books are kept as a safety copy in the data folder{dataDir ? <> (<b>{dataDir}</b>)</> : ''}, so nothing is lost.</p>
+          <p className="hint">Close Stockwell on the second PC first. Restoring replaces this company's books ({nav.company.name}) with the backup; other companies are not touched. The current books are kept as a safety copy in the data folder{dataDir ? <> (<b>{dataDir}</b>)</> : ''}, so nothing is lost.</p>
           <div className="actions" style={{ justifyContent: 'flex-start' }}><button className="btn danger" onClick={restore}>Restore from a backup…</button></div>
         </>
       ) : (

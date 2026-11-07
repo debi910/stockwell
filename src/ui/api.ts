@@ -13,28 +13,44 @@ export function setToken(t: string | null) {
 }
 export const getToken = () => token;
 
+// Which company this PC works in (each company is its own folder on the main PC). Kept per PC, like Tally's last company.
+let company: string | null = null;
+try { company = localStorage.getItem('stockwell-company'); } catch { /* storage blocked */ }
+export function setCompany(id: string | null) {
+  company = id;
+  try { if (id) localStorage.setItem('stockwell-company', id); else localStorage.removeItem('stockwell-company'); } catch { /* ignore */ }
+}
+export const getCompany = () => company;
+let onNoCompany: () => void = () => {};
+export const whenNoCompany = (f: () => void) => { onNoCompany = f; };
+
 /** Headers that carry the login, for the odd fetch made outside api below. */
-export const authHeaders = (): Record<string, string> => (token ? { 'x-stockwell-token': token } : {});
+export const authHeaders = (): Record<string, string> => ({ ...(token ? { 'x-stockwell-token': token } : {}), ...(company ? { 'x-stockwell-company': company } : {}) });
 
 /** A link to the printed bill for a new window or the PDF maker. It carries a one-use pass
  *  that lasts a minute, never the login token itself. */
 export async function printUrl(id: number): Promise<string> {
+  const q = new URLSearchParams();
+  if (company) q.set('company', company);
+  if (token) {
+    const { ticket } = await api.post<{ ticket: string | null }>('/api/print-ticket');
+    if (ticket) q.set('ticket', ticket);
+  }
   const base = `${location.origin}/api/vouchers/${id}/print`;
-  if (!token) return base;
-  const { ticket } = await api.post<{ ticket: string | null }>('/api/print-ticket');
-  return ticket ? `${base}?ticket=${ticket}` : base;
+  return q.toString() ? `${base}?${q}` : base;
 }
 
 let onLoggedOut: () => void = () => {};
 export const whenLoggedOut = (f: () => void) => { onLoggedOut = f; };
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, url: string, body?: unknown, timeoutMs?: number, inCompany?: string): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['x-stockwell-token'] = token;
+  if (inCompany || company) headers['x-stockwell-company'] = (inCompany || company)!;
   let res: Response;
   try {
-    res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(method === 'GET' ? 30000 : 20000) });
+    res = await fetch(url, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs ?? (method === 'GET' ? 30000 : 20000)) });
   } catch (e: any) {
     const timedOut = e?.name === 'TimeoutError';
     throw new ApiError(timedOut
@@ -44,7 +60,9 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   const text = await res.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-  if (res.status === 401) onLoggedOut();
+  // A refusal in another company (an import into a new one) must not log this PC out of its own company.
+  if (res.status === 401 && !inCompany) onLoggedOut();
+  if (res.status === 404 && data?.code === 'no-company' && !inCompany) onNoCompany();
   if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status, data?.code);
   return data as T;
 }
@@ -65,6 +83,8 @@ export const api = {
   post: <T = any>(url: string, body?: unknown) => request<T>('POST', url, body ?? {}),
   put: <T = any>(url: string, body?: unknown) => request<T>('PUT', url, body ?? {}),
   del: <T = any>(url: string) => request<T>('DELETE', url),
+  /** A big upload or a slow job (a Tally file of many years), with more time than a normal save. */
+  slow: <T = any>(url: string, body: unknown, minutes = 10, inCompany?: string) => request<T>('POST', url, body, minutes * 60_000, inCompany),
 };
 
 /** Functions the Windows app adds; in a plain browser we fall back to downloads and new tabs. */
@@ -78,7 +98,7 @@ interface Bridge {
   /** Opens the setup page again (main PC or connect to it); on the main PC an Owner's login is needed. */
   resetConnection(token: string | null): Promise<void>;
   /** Only on the main PC. */
-  restore?(token: string | null): Promise<void>;
+  restore?(token: string | null, company: string | null): Promise<boolean | void>;
 }
 
 declare global {

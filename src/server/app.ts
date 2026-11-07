@@ -3,24 +3,31 @@ import fastifyStatic from '@fastify/static';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openDb } from './db';
+import { CompanyStore, companyContext, perCompany, type Company } from './companies';
 import { Books, BooksError, VOUCHER_TYPES, isoDate } from './books';
 import * as R from './reports';
 import { gstr1, gstr3b, gstr2bMatch, ewayBillJson, ewayCandidates, periodRange } from './gstExport';
 import { billMessage, invoiceHtml, reminderMessage } from './invoice';
-import { fetchTallyMasters, importTallyMasters, parseTallyMasters } from './tally';
-import { installAuth, type Users } from './users';
+import { fetchTallyCompanies, fetchTallyMasters, importTallyMasters, parseTallyMasters } from './tally';
+import { importJob, importTallyXml, startTallyImport } from './tallyImport';
+import { exportCompanyFolder } from './tallyExport';
+import { installAuth, isLoopback, type Users } from './users';
 import { STATES, GST_RATES } from '../core/gst';
 import { financialYear, todayISO } from '../core/dates';
 
 export interface AppOptions {
-  dbPath: string;
+  /** One books file (tests, or a single company). */
+  dbPath?: string;
+  /** The folder holding Companies\<id>\stockwell.db: several companies, like TallyPrime. */
+  dataDir?: string;
   uiDir?: string;
   logger?: boolean;
   /** File where unexpected errors are written, so a problem can be traced later. */
   errorLog?: string;
   /** Where backups go when no folder is chosen in Company settings (Documents\\Stockwell\\Backups on Windows). */
   defaultBackupDir?: string;
+  /** Where company exports go when no folder is chosen (Documents\\Stockwell\\Exports). */
+  exportDir?: string;
 }
 
 /** Appends one line to the error log; never throws (a full disk must not crash the server). */
@@ -37,9 +44,12 @@ export function logError(file: string | undefined, where: string, err: unknown) 
 
 type Q = Record<string, string | undefined>;
 
-export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; books: Books; users: Users }> {
-  const db = openDb(opts.dbPath);
-  const books = new Books(db);
+export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; books: Books; users: Users; store: CompanyStore }> {
+  const store = new CompanyStore({ dataDir: opts.dataDir, dbPath: opts.dbPath });
+  // Every route works on the company the request names; outside a request (or with no name) it is the default company.
+  const current = (): Company => companyContext.getStore() ?? store.get(store.defaultId());
+  const books = perCompany(() => current().books);
+  const usersOf = perCompany(() => current().users);
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 1024 * 1024 });
 
   app.setErrorHandler((err, _req, reply) => {
@@ -60,7 +70,20 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return reply.status(500).send({ error: `Something went wrong and nothing was saved. (${e.message || 'unknown error'})` });
   });
 
-  app.addHook('onClose', async () => db.close());
+  app.addHook('onClose', async () => store.closeAll());
+  // Which company: the header from the screens, or ?company= on a link opened in its own window (a printed bill).
+  app.addHook('onRequest', (req, reply, done) => {
+    const h = req.headers['x-stockwell-company'];
+    const q = (req.query as Record<string, unknown> | undefined)?.company;
+    const id = typeof h === 'string' && h ? h : typeof q === 'string' && q ? q : store.defaultId();
+    let c: Company;
+    try { c = store.get(id); } catch (e) {
+      if (!req.url.startsWith('/api/') || req.url.startsWith('/api/companies/list') || req.url.startsWith('/api/meta')) return done();
+      reply.status(404).send({ error: (e as Error).message, code: 'no-company' });
+      return;
+    }
+    companyContext.run(c, done);
+  });
   // Dates and months in report links must be real ones: a typo gives a clear message, never a crash or a blank report.
   app.addHook('preValidation', async (req) => {
     const q = (req.query ?? {}) as Record<string, unknown>;
@@ -72,7 +95,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     for (const [k, v] of Object.entries(p)) if (/id$/i.test(k) && !/^\d+$/.test(String(v))) throw new BooksError('That entry was not found.');
     for (const k of ['ledgerId', 'partyId', 'itemId', 'stockGroupId']) if (q[k] !== undefined && q[k] !== '' && !/^\d+$/.test(String(q[k]))) throw new BooksError('That entry was not found.');
   });
-  const users = installAuth(app, books);
+  const users = installAuth(app, books, usersOf);
 
   const num = (v: string | undefined) => (v === undefined || v === '' ? undefined : Number(v));
   /** A text filter from the address: blank means no filter. */
@@ -88,7 +111,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return payload;
   });
   app.get('/api/meta', async () => ({
-    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.3.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
+    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.4.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
   }));
   // Every change to the books writes an edit-log row, so its newest id tells open screens on any PC that something changed.
   // Each open Stockwell asks every few seconds, which also tells the main PC how many PCs are working now.
@@ -99,8 +122,22 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     for (const [ip, t] of lastSeen) if (now - t > 20_000) lastSeen.delete(ip);
     return { v: (books.db.prepare(`SELECT COALESCE(MAX(id),0) AS v FROM audit`).get() as { v: number }).v, pcs: lastSeen.size };
   });
-  app.get('/api/company', async () => ({ ...books.company(), fy: financialYear(todayISO()), default_backup_dir: opts.defaultBackupDir ?? '' }));
+  app.get('/api/company', async () => ({
+    ...books.company(), fy: financialYear(todayISO()), default_backup_dir: opts.defaultBackupDir ?? '',
+    id: current().id, backup_subfolder: store.multi ? backupFolderName(current()) : '',
+  }));
   app.put('/api/company', async (req) => books.updateCompany(req.body as Record<string, never>));
+  // ----- companies (each in its own folder) -----
+  // The list is shown before logging in, as TallyPrime shows its company list first.
+  app.get('/api/companies/list', async (req) => ({
+    multi: store.multi,
+    current: companyContext.getStore()?.id ?? store.defaultId(),
+    companies: store.list().map((c) => ({ ...c, folder: isLoopback(req.ip) ? c.folder : '' })),
+  }));
+  app.post('/api/companies', async (req) => {
+    const c = store.create((req.body ?? {}) as Record<string, unknown>, current().books);
+    return store.list().find((x) => x.id === c.id);
+  });
 
   // ----- accounting masters -----
   app.get('/api/groups', async () => books.groups());
@@ -289,15 +326,42 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.post('/api/gst/eway-json', async (req) => ewayBillJson(books, Array.isArray((req.body as { ids?: unknown })?.ids) ? (req.body as { ids: number[] }).ids : (() => { throw new BooksError('Choose the bills for the e-Way Bill.'); })()));
 
   // ----- utilities -----
-  app.post('/api/import/tally', { bodyLimit: 30 * 1024 * 1024 }, async (req) => {
+  // A Tally export file (masters, Day Book or both), or the masters straight from TallyPrime.
+  app.post('/api/import/tally', { bodyLimit: 400 * 1024 * 1024 }, async (req) => {
     const body = (req.body ?? {}) as { xml?: string; url?: string };
     if (body.xml !== undefined && typeof body.xml !== 'string') throw new BooksError('The Tally file could not be read.');
-    const xml = body.xml ?? (await fetchTallyMasters(body.url || 'http://localhost:9000'));
-    return importTallyMasters(books, parseTallyMasters(xml));
+    if (body.xml !== undefined) return importTallyXml(books, body.xml);
+    const m = parseTallyMasters(await fetchTallyMasters(text(body.url) || 'http://localhost:9000'));
+    return { ...importTallyMasters(books, m), vouchers: null };
   });
+  // Straight from TallyPrime: the companies open there, then a whole company (masters and every voucher) as a job.
+  app.get('/api/tally/companies', async (req) => fetchTallyCompanies(text((req.query as Q).url) || 'http://localhost:9000'));
+  app.post('/api/tally/import', async (req) => {
+    const b = (req.body ?? {}) as { url?: unknown; companies?: unknown; into?: unknown };
+    const into = b.into === 'current' ? 'current' : 'new';
+    return startTallyImport(store, { url: text(b.url) || 'http://localhost:9000', companies: b.companies as string[], into, current: current() });
+  });
+  // Each company's data as Tally XML, in a folder of its own: <folder>\<Company (100000)>\Masters.xml and DayBook.xml.
+  app.post('/api/export/companies', async (req) => {
+    const b = (req.body ?? {}) as { all?: unknown; dir?: unknown };
+    const chosen = text(b.dir);
+    if (chosen && !isLoopback(req.ip)) throw new BooksError('A folder can be chosen only on the main PC. From this PC the export goes to the main PC\'s Documents\\Stockwell\\Exports.');
+    const dir = chosen || opts.exportDir || (opts.defaultBackupDir ? path.join(path.dirname(opts.defaultBackupDir), 'Exports') : '');
+    if (!dir) throw new BooksError('Choose a folder for the export.');
+    if (chosen && !path.isAbsolute(chosen)) throw new BooksError('Choose the export folder with the Browse button.');
+    const which = b.all === true ? store.all() : [current()];
+    const done: { id: string; name: string; folder: string; vouchers: number }[] = [];
+    for (const c of which) {
+      try { done.push({ id: c.id, name: c.books.company().name, ...exportCompanyFolder(c.books, c.id, dir) }); } catch (e) {
+        throw new BooksError(`Could not write the export to ${dir}: ${(e as Error).message}`);
+      }
+    }
+    return { dir, companies: done };
+  });
+  app.get('/api/tally/jobs/:job', async (req) => importJob(Number((req.params as Q).job)) ?? (() => { throw new BooksError('That import was not found.'); })());
   app.post('/api/backup', async () => {
     if (!books.company().backup_dir && !opts.defaultBackupDir) throw new BooksError('Choose a backup folder in Company settings first.');
-    const r = await backupAll(books, opts.defaultBackupDir ?? '');
+    const r = await backupAll(books, opts.defaultBackupDir ?? '', store.multi ? backupFolderName(current()) : '');
     if (!r.local && !r.cloud) throw new BooksError(r.errors.join(' '));
     return r;
   });
@@ -318,7 +382,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     });
   }
 
-  return { app, books, users };
+  return { app, books, users, store };
 }
 
 const maxDate = (a: string, b: string) => (a > b ? a : b);
@@ -339,20 +403,27 @@ export function cloudFolders(env: NodeJS.ProcessEnv = process.env, exists: (p: s
 
 /** Backs up to the backup folder (or Documents) and to the cloud folder, if one is set. One failing does not stop the other.
  *  When each last worked, and what went wrong, is kept in the company record so every PC can show it. */
-export async function backupAll(books: Books, defaultDir: string) {
+/** With several companies, each one's backups go in a folder of its own inside the backup folder. */
+export const backupFolderName = (c: Company) => {
+  const name = c.books.company().name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '-').replace(/[. ]+$/, '').trim().slice(0, 60);
+  return name ? `${name} (${c.id})` : `Company ${c.id}`;
+};
+
+export async function backupAll(books: Books, defaultDir: string, sub = '') {
   const c = books.company();
+  const inSub = (d: string) => (d && sub ? path.join(d, sub) : d);
   const errors: string[] = [];
   const now = new Date().toISOString();
   let local: string | null = null;
   let cloud: string | null = null;
   const localDir = c.backup_dir || defaultDir;
-  try { if (localDir) local = (await backup(books, localDir)).file; } catch (e) {
+  try { if (localDir) local = (await backup(books, inSub(localDir))).file; } catch (e) {
     errors.push((e as Error).message);
     // A pen drive that is not plugged in should not stop the copy: fall back to Documents.
-    if (defaultDir && localDir !== defaultDir) { try { local = (await backup(books, defaultDir)).file; } catch (e2) { errors.push((e2 as Error).message); } }
+    if (defaultDir && localDir !== defaultDir) { try { local = (await backup(books, inSub(defaultDir))).file; } catch (e2) { errors.push((e2 as Error).message); } }
   }
   if (c.cloud_backup_dir && path.resolve(c.cloud_backup_dir) !== path.resolve(localDir || '.')) {
-    try { cloud = (await backup(books, c.cloud_backup_dir)).file; } catch (e) { errors.push(`Cloud folder: ${(e as Error).message}`); }
+    try { cloud = (await backup(books, inSub(c.cloud_backup_dir))).file; } catch (e) { errors.push(`Cloud folder: ${(e as Error).message}`); }
   }
   books.db.prepare(`UPDATE company SET last_backup=CASE WHEN @local THEN @now ELSE last_backup END,
     last_cloud_backup=CASE WHEN @cloud THEN @now ELSE last_cloud_backup END, backup_error=@err WHERE id=1`)

@@ -27,6 +27,8 @@ export interface Nav {
   company: any;
   meta: any;
   refreshCompany(): Promise<void>;
+  /** Opens another company (each company is its own folder on the main PC); its own login is asked if it has one. */
+  openCompany(id: string): void;
   workDate: string;
   setWorkDate(d: string): void;
   setScreenKeys(depth: number, keys: KeyAction[]): void;

@@ -26,8 +26,10 @@ describe('Tally import', () => {
   it('adds new masters and leaves existing ones alone', async () => {
     const { call } = await setup();
     const r = await call('POST', '/api/import/tally', { xml: XML });
-    expect(r).toMatchObject({ groups: 1, ledgers: 1, units: 1, stockGroups: 1, items: 1 });
+    // Maa Tarini is new; Stockwell's own Cash ledger, still unused, takes Tally's opening balance.
+    expect(r).toMatchObject({ groups: 1, ledgers: 2, units: 1, stockGroups: 1, items: 1 });
     const ledgers = await call<any[]>('GET', '/api/ledgers');
+    expect(ledgers.find((l) => l.name === 'Cash').opening).toBe(200000);
     const tarini = ledgers.find((l) => l.name === 'Maa Tarini Stores');
     expect(tarini.state_code).toBe('21');
     expect(tarini.bill_wise).toBe(true);

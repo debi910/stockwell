@@ -5,8 +5,8 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { backupAll, backupDue, buildApp, checkBackupFile, logError } from '../src/server/app';
-import type { Books } from '../src/server/books';
+import { backupAll, backupDue, backupFolderName, buildApp, checkBackupFile, logError } from '../src/server/app';
+import type { CompanyStore } from '../src/server/companies';
 
 const PORT = 7400;
 type Config = { mode: 'main' | 'client'; address?: string; /** Show the setup page again, with the current choice ready to keep. */ reconfigure?: boolean };
@@ -15,7 +15,7 @@ const userData = app.getPath('userData');
 const configFile = path.join(userData, 'config.json');
 const docs = path.join(app.getPath('documents'), 'Stockwell');
 const defaultBackupDir = path.join(docs, 'Backups');
-const dbPath = path.join(userData, 'stockwell.db');
+const exportDir = path.join(docs, 'Exports');
 const setupPage = path.join(__dirname, 'setup.html');
 
 const readConfig = (): Config | null => {
@@ -48,7 +48,7 @@ let win: BrowserWindow | null = null;
 let config = readConfig();
 let appOrigin = ''; // where the books screens are served from; only that page may use the desktop functions
 let server: FastifyInstance | null = null;
-let books: Books | null = null;
+let store: CompanyStore | null = null;
 let closing = false;
 
 // ----- who may call what -----
@@ -102,22 +102,26 @@ function createWindow(preload: 'preload.cjs' | 'preload-setup.cjs') {
   return win;
 }
 
-/** The automatic backup: to the backup folder and the cloud folder, every few hours as set in Company (F3), and on closing. */
+/** The automatic backup of every company: to its backup folder and cloud folder (each company in a folder of its own),
+ *  every few hours as set in its Company settings (F3), and on closing. */
 async function autoBackup(force = false) {
-  if (!books || closing) return;
-  if (!force && !backupDue(books)) return;
-  try {
-    const r = await backupAll(books, defaultBackupDir);
-    if (r.errors.length) logError(errorLog, 'backup', new Error(r.errors.join(' ')));
-  } catch (e) {
-    logError(errorLog, 'backup', e);
+  if (!store || closing) return;
+  for (const c of store.all()) {
+    try {
+      if (!force && !backupDue(c.books)) continue;
+      const r = await backupAll(c.books, defaultBackupDir, backupFolderName(c));
+      if (r.errors.length) logError(errorLog, `backup ${c.id}`, new Error(r.errors.join(' ')));
+    } catch (e) {
+      logError(errorLog, `backup ${c.id}`, e);
+    }
   }
 }
 
 async function startMain() {
-  const built = await buildApp({ dbPath, uiDir: path.join(__dirname, '../ui'), errorLog, defaultBackupDir });
+  // Each company is a folder: <userData>\Companies\100000\stockwell.db (older single books move there by themselves).
+  const built = await buildApp({ dataDir: userData, uiDir: path.join(__dirname, '../ui'), errorLog, defaultBackupDir, exportDir });
   server = built.app;
-  books = built.books;
+  store = built.store;
   await server.listen({ port: PORT, host: '0.0.0.0' });
 
   // Automatic backup: checked every 15 minutes, done as often as Company settings say, and again when Stockwell closes.
@@ -247,50 +251,39 @@ ipcMain.handle('resetConnection', async (e, token: string | null) => {
   app.quit(); // runs the closing backup first
 });
 
-/** Puts a backup back in place of the current books. Owner only, main PC only. */
-ipcMain.handle('restore', async (e, token: string | null) => {
+/** Puts a backup back in place of one company's books. Owner of that company only, main PC only. The other companies stay open. */
+ipcMain.handle('restore', async (e, token: string | null, company: string | null) => {
   fromBooks(e);
-  if (config?.mode !== 'main' || !server || !books) throw new Error('Restoring is done on the main PC.');
-  const s = await server.inject({ method: 'GET', url: '/api/session', headers: token ? { 'x-stockwell-token': String(token) } : {} });
+  if (config?.mode !== 'main' || !server || !store) throw new Error('Restoring is done on the main PC.');
+  const id = String(company ?? store.defaultId());
+  const c = store.get(id);
+  const s = await server.inject({ method: 'GET', url: '/api/session', headers: { 'x-stockwell-company': id, ...(token ? { 'x-stockwell-token': String(token) } : {}) } });
   const session = JSON.parse(s.body);
   if (session.usersEnabled && session.user?.role !== 'owner') throw new Error('Only an Owner can restore a backup.');
 
   const pick = await dialog.showOpenDialog(win!, {
-    title: 'Choose the backup to restore',
-    defaultPath: books.company().backup_dir || defaultBackupDir,
+    title: `Choose the backup to restore into ${c.books.company().name || `company ${id}`}`,
+    defaultPath: path.join(c.books.company().backup_dir || defaultBackupDir, backupFolderName(c)),
     filters: [{ name: 'Stockwell backup', extensions: ['db'] }], properties: ['openFile'],
   });
-  if (pick.canceled || !pick.filePaths[0]) return;
+  if (pick.canceled || !pick.filePaths[0]) return false;
   const file = pick.filePaths[0];
-  if (path.resolve(file) === path.resolve(dbPath)) throw new Error('That is the books file in use now. Choose a backup copy.');
+  if (path.resolve(file) === path.resolve(c.dbPath)) throw new Error('That is the books file in use now. Choose a backup copy.');
   const info = checkBackupFile(file);
   const answer = await dialog.showMessageBox(win!, {
     type: 'warning', buttons: ['Restore', 'Cancel'], defaultId: 1, cancelId: 1, title: 'Restore backup',
-    message: `Replace the current books with this backup?`,
-    detail: `${path.basename(file)}\nCompany: ${info.company || '(not set)'}\nVouchers: ${info.vouchers}${info.lastDate ? `, last entry on ${info.lastDate}` : ''}\n\nEntries made after this backup will not be in the restored books. The current books are kept as a safety copy. Stockwell restarts after restoring.`,
+    message: `Replace the books of ${c.books.company().name || `company ${id}`} with this backup?`,
+    detail: `${path.basename(file)}\nCompany in the backup: ${info.company || '(not set)'}\nVouchers: ${info.vouchers}${info.lastDate ? `, last entry on ${info.lastDate}` : ''}\n\nEntries made after this backup will not be in the restored books. The current books are kept as a safety copy. Other companies are not touched.`,
   });
-  if (answer.response !== 0) return;
-
-  // Keep a safety copy of the current books first, while they are still open and consistent.
-  const safetyDir = path.join(userData, 'safety-copies');
-  fs.mkdirSync(safetyDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-  const safety = path.join(safetyDir, `stockwell-before-restore-${stamp}.db`);
-  await books.db.backup(safety);
-
-  closing = true;
-  await server.close(); // closes the database and folds the write-ahead log into the file
+  if (answer.response !== 0) return false;
   try {
-    for (const ext of ['-wal', '-shm']) fs.rmSync(dbPath + ext, { force: true });
-    fs.copyFileSync(file, `${dbPath}.restoring`);
-    fs.renameSync(`${dbPath}.restoring`, dbPath);
+    await store.replace(id, file, path.join(userData, 'safety-copies'));
   } catch (err) {
     logError(errorLog, 'restore', err);
-    try { fs.copyFileSync(safety, dbPath); } catch (err2) { logError(errorLog, 'restore (undo)', err2); }
     dialog.showErrorBox('Restore failed', `The backup could not be put in place, so the books were left as they were. Details are in ${errorLog}.`);
+    return false;
   }
-  app.relaunch();
-  app.exit(0);
+  return true;
 });
 
 // ----- first-run setup page -----

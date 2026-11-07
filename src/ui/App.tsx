@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
-import { api, downloadText, saveTextFile, desktop, getToken, setToken, whenLoggedOut } from './api';
+import { api, downloadText, saveTextFile, desktop, getToken, setToken, whenLoggedOut, getCompany, setCompany, whenNoCompany } from './api';
+import { CompanyPicker, type CompanyRow } from './screens/Companies';
 import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName, reportList } from './nav';
 import { VOUCHER_LABEL, parseDate, shortDate, todayISO } from './format';
 import { TYPE_KEYS } from './screens/Voucher';
@@ -9,12 +10,42 @@ import { LoginScreen } from './screens/Settings';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DialogHost, confirmBox } from './components/Dialog';
 
-/** Checks whether logins are on and, if so, asks for one before opening the books. */
+/** Picks the company (each is its own folder on the main PC), checks whether logins are on and, if so,
+ *  asks for one before opening the books. */
 export function App() {
   const [session, setSession] = useState<{ usersEnabled: boolean; user: any; needsOwnerSetup?: boolean } | null>(null);
   const [failed, setFailed] = useState('');
+  // undefined: still asking the main PC; null: this PC must pick a company first.
+  const [chosen, setChosen] = useState<string | null | undefined>(undefined);
+  const [companies, setCompanies] = useState<CompanyRow[]>([]);
   const check = useCallback(() => api.get('/api/session').then(setSession).catch((e) => setFailed(e.message)), []);
-  useEffect(() => { check(); whenLoggedOut(() => { setToken(null); check(); }); }, [check]);
+  const loadCompanies = useCallback(async () => {
+    try {
+      const l = await api.get<{ companies: CompanyRow[] }>('/api/companies/list');
+      setCompanies(l.companies);
+      const ids = l.companies.filter((c) => !c.error).map((c) => c.id);
+      const mine = getCompany();
+      const pick = mine && ids.includes(mine) ? mine : ids.length === 1 ? ids[0] : null;
+      setCompany(pick);
+      setChosen(pick);
+    } catch (e: any) {
+      // A main PC on an older Stockwell has one company and no list.
+      if (e?.status === 404) { setCompany(null); setChosen(''); } else setFailed(e.message);
+    }
+  }, []);
+  const openCompany = useCallback((id: string | null) => {
+    // A login belongs to one company: opening another asks for its own.
+    if (id !== getCompany()) setToken(null);
+    setCompany(id);
+    setSession(null);
+    setChosen(id);
+  }, []);
+  useEffect(() => {
+    loadCompanies();
+    whenLoggedOut(() => { setToken(null); check(); });
+    whenNoCompany(() => { setCompany(null); setSession(null); loadCompanies(); });
+  }, [check, loadCompanies]);
+  useEffect(() => { if (chosen !== undefined && chosen !== null) check(); }, [chosen, check]);
   useEffect(() => {
     // A failed request that a screen forgot to handle still shows a message instead of failing silently.
     const onRejection = (e: PromiseRejectionEvent) => {
@@ -26,27 +57,31 @@ export function App() {
   }, []);
   const toaster = <><DialogHost /><Toaster position="bottom-right" duration={3000} visibleToasts={3} gap={8} offset={{ bottom: 40, right: 196 }} toastOptions={{ className: 'sw-toast' }} /></>;
   if (failed) return <div className="empty-state">Cannot reach the Stockwell server: {failed}. If this is the second PC, check the main PC is on.</div>;
+  if (chosen === undefined) return <div className="empty-state">Opening Stockwell…</div>;
+  if (chosen === null) return <>{toaster}<CompanyPicker companies={companies} current={getCompany()} onOpen={(id) => openCompany(id)} /></>;
   if (!session) return <div className="empty-state">Opening Stockwell…</div>;
+  const others = companies.length > 1 ? <div style={{ textAlign: 'center', marginTop: 12 }}><button className="btn" onClick={() => openCompany(null)}>Open another company</button></div> : null;
   if (session.needsOwnerSetup) {
     return (
       <div className="empty-state">
         The books are locked to other PCs until the Owner's login is set up. On the main PC, open Stockwell and go to
         Settings &gt; Users, create the Owner login, then come back here and press F5.
         <div style={{ marginTop: 12 }}><button className="btn" onClick={check}>Try again</button></div>
+        {others}
       </div>
     );
   }
   if (session.usersEnabled && !session.user) {
-    return <>{toaster}<LoginScreen onLogin={(user) => setSession({ usersEnabled: true, user })} /></>;
+    return <>{toaster}<LoginScreen onLogin={(user) => setSession({ usersEnabled: true, user })} />{others}</>;
   }
   const logout = async () => { await api.post('/api/logout').catch(() => {}); setToken(null); check(); };
-  return <>{toaster}<Books user={session.user} onLogout={session.usersEnabled ? logout : undefined} /></>;
+  return <>{toaster}<Books key={chosen} user={session.user} onLogout={session.usersEnabled ? logout : undefined} openCompany={openCompany} /></>;
 }
 
 /** Each opened screen gets its own id, so a replaced screen always starts fresh. */
 let screenSeq = 0;
 
-function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
+function Books({ user, onLogout, openCompany }: { user: any; onLogout?: () => void; openCompany: (id: string | null) => void }) {
   const [stack, setStack] = useState<Screen[]>([{ name: 'gateway' }]);
   const stackRef = useRef(stack);
   stackRef.current = stack;
@@ -86,11 +121,12 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     toast: (text, error) => (error ? toast.error(text, { id: 'sw-error', duration: 6000 }) : (toast.dismiss('sw-error'), toast.success(text))),
     user,
     company, meta, refreshCompany, workDate, setWorkDate,
+    openCompany: (id: string) => openCompany(id),
     setScreenKeys: (d, k) => setScreenKeysState((s) => ({ ...s, [d]: k })),
     setTitle: (d, t) => setTitles((s) => (s[d] === t ? s : { ...s, [d]: t })),
     registerHandler: (d, h) => { handlers.current[d] = h; },
     depth: 0,
-  }), [stack, company, meta, refreshCompany, workDate, user]);
+  }), [stack, company, meta, refreshCompany, workDate, user, openCompany]);
 
   const navRef = useRef(nav);
   navRef.current = nav;
@@ -191,6 +227,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
     { key: 'F11', label: 'Features', run: () => (user && user.role !== 'owner' ? toast.error('Only an Owner can change company features.', { id: 'owner-only-f11' }) : navRef.current.push({ name: 'features' })) },
     { key: 'Ctrl+E', label: 'Export', hidden: true, run: () => exportVisibleTable(titles[stack.length - 1] ?? screenTitle(stack[stack.length - 1])) },
     { key: 'Ctrl+N', label: 'Calculator', hidden: true, run: () => setCalc(true) },
+    { key: 'Alt+F3', label: 'Select Company', hidden: true, run: () => navRef.current.push({ name: 'companies' }) },
     { key: 'Alt+G', label: 'Go To', run: () => openGoTo() },
     { key: 'Ctrl+G', label: 'Go To', hidden: true, run: () => openGoTo() },
     { key: 'F12', label: 'Configure', hidden: true, run: () => toast.info('F12 configures voucher entry. Open a voucher (F4 to F9) and press F12 there.') },
@@ -227,7 +264,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
       <div className="shell">
         <header className="topbar">
           <div className="brand"><img src="./logo.svg" alt="" />Stockwell</div>
-          <div className="company">{company.name}</div>
+          <button className="company linkish" title="Select another company (Alt+F3)" onClick={() => navRef.current.push({ name: 'companies' })}>{company.name || 'Company'}</button>
           <div className="date">Date: {shortDate(workDate)} · FY {company.fy.label}</div>
           {user && <div className="user" title={user.role === 'owner' ? 'Owner' : 'Billing operator'}>{user.name}</div>}
         </header>

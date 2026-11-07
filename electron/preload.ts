@@ -9,5 +9,5 @@ contextBridge.exposeInMainWorld('stockwell', {
   chooseFolder: () => ipcRenderer.invoke('chooseFolder'),
   connection: () => ipcRenderer.invoke('connection'),
   resetConnection: (token: string | null) => ipcRenderer.invoke('resetConnection', token),
-  restore: (token: string | null) => ipcRenderer.invoke('restore', token),
+  restore: (token: string | null, company: string | null) => ipcRenderer.invoke('restore', token, company),
 });

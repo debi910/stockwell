@@ -80,6 +80,8 @@ const DESTS: Dest[] = [
   { label: 'Users and Passwords', group: 'Company', open: screen('users'), owner: true },
   { label: 'Backup / Restore', group: 'Data', open: screen('backup'), owner: true },
   { label: 'Import from Tally', group: 'Data', open: screen('import-tally'), owner: true },
+  { label: 'Export to Tally (XML)', group: 'Data', open: screen('export-companies'), owner: true },
+  { label: 'Select Company', group: 'Data', open: screen('companies') },
 ];
 
 export function GoTo() {

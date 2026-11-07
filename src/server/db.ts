@@ -310,6 +310,9 @@ function migrate(db: DB) {
   add('company', 'backup_every_hours', 'INTEGER NOT NULL DEFAULT 4'); // 0 = once a day
   add('company', 'last_cloud_backup', "TEXT NOT NULL DEFAULT ''");
   add('company', 'backup_error', "TEXT NOT NULL DEFAULT ''");
+  // ---- v0.4: brought in from TallyPrime ----
+  add('vouchers', 'tally_id', 'TEXT DEFAULT NULL'); // the voucher's GUID in Tally, so importing again skips it
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_tally_id ON vouchers(tally_id) WHERE tally_id IS NOT NULL`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS salesmen (
       id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, phone TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '',
