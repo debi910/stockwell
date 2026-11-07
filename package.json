@@ -1,0 +1,73 @@
+{
+  "name": "stockwell",
+  "productName": "Stockwell",
+  "version": "0.3.0",
+  "description": "Billing, accounts and stock for an FMCG distributorship. Works offline on Windows.",
+  "private": true,
+  "type": "module",
+  "main": "dist/electron/main.cjs",
+  "scripts": {
+    "dev:server": "tsx watch src/server/dev.ts",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build": "npm run build:ui && npm run build:electron",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run tests/core tests/api tests/qa/fmcg tests/qa/pharma",
+    "test:e2e": "npm run build:ui && vitest run tests/e2e",
+    "dist": "npm run build && electron-builder --win --publish never"
+  },
+  "build": {
+    "appId": "in.stockwell.app",
+    "productName": "Stockwell",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Stockwell"
+    }
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "@fastify/static": "^10.1.8",
+    "@fontsource/inter": "^5.3.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "fast-xml-parser": "^5.11.2",
+    "fastify": "^5.12.8",
+    "playwright": "^1.63.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sonner": "^2.0.8",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vitest": "^3.2.7"
+  }
+}
