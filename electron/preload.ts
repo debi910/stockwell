@@ -8,6 +8,6 @@ contextBridge.exposeInMainWorld('stockwell', {
   showInFolder: (file: string) => ipcRenderer.invoke('showInFolder', file),
   chooseFolder: () => ipcRenderer.invoke('chooseFolder'),
   connection: () => ipcRenderer.invoke('connection'),
-  resetConnection: () => ipcRenderer.invoke('resetConnection'),
+  resetConnection: (token: string | null) => ipcRenderer.invoke('resetConnection', token),
   restore: (token: string | null) => ipcRenderer.invoke('restore', token),
 });

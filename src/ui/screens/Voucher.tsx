@@ -12,6 +12,8 @@ const INVENTORY = ['sales', 'purchase', 'credit_note', 'debit_note', 'sales_orde
 const BOOKS = ['sales', 'purchase', 'credit_note', 'debit_note'];
 /** Types priced at the selling rate. */
 const SELL = ['sales', 'credit_note', 'sales_order', 'rejection_in', 'delivery_note'];
+/** Vouchers that carry a salesman: the sale itself, its order, note and returns, and the money he collects. */
+const WITH_SALESMAN = [...SELL, 'receipt'];
 /** Types that bring stock in, so a new batch can be typed. */
 const STOCK_IN = ['purchase', 'credit_note', 'rejection_in', 'receipt_note'];
 /** Types on the buying side: an unregistered supplier charges no GST. */
@@ -136,11 +138,16 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
   useTitle(id ? `Alter ${label} Voucher` : `${label} Voucher Creation`);
   const modal = billEdit !== null || details || query !== null || showConfig;
 
+  const [salesmen, setSalesmen] = useState<any[]>([]);
+  const [salesman, setSalesman] = useState('');
+  /** Picked by hand (or loaded from a saved voucher): a change of party no longer replaces it. */
+  const salesmanSet = useRef(false);
   const reloadMasters = useCallback(async () => {
-    const [l, i, g] = await Promise.all([api.get('/api/ledgers'), api.get('/api/items'), api.get('/api/godowns')]);
+    const [l, i, g, sm] = await Promise.all([api.get('/api/ledgers'), api.get('/api/items'), api.get('/api/godowns'), api.get('/api/salesmen')]);
     setLedgers(l);
     setItems(i);
     setGodowns(g);
+    setSalesmen(sm);
   }, []);
   useEffect(() => { if (active) reloadMasters().catch((e) => nav.toast(e.message, true)); }, [active, reloadMasters]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -194,6 +201,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
       setNarration(v.narration ?? '');
       if (INVENTORY.includes(v.type)) {
         setPartyId(v.party_id);
+        if (!copy) { setSalesman(v.salesman ?? ''); salesmanSet.current = true; }
         setMode(v.mode === 'accounting' ? 'accounting' : 'item');
         if (v.mode === 'accounting') {
           setTaxRows([...v.taxLines.map((t: any) => ({ key: keySeq++, ledgerId: t.ledger_id, hsn: t.hsn ?? '', gst: t.gst_rate ? String(t.gst_rate) : '', amount: rupeesText(t.base ?? t.taxable) })), blankTax()]);
@@ -399,6 +407,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     setRoundOffText('');
     setAcc([blankAcc(journal ? 'Dr' : 'Cr')]);
     setPartyId(null);
+    setSalesman(''); salesmanSet.current = false;
     setNarration('');
     setRefNo('');
     setRefDate('');
@@ -433,6 +442,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     const badExpiry = inventory && filledLines.find((l) => l.expiry && !parseDate(l.expiry, date ?? undefined));
     if (badExpiry) { nav.toast(`The expiry date "${badExpiry.expiry}" is not a date. Type it like 30-11-27.`, true); return; }
     const body: any = { type, date, narration, optional, refNo, refDate: refDate ? parseDate(refDate, date ?? undefined) : null };
+    if (showSalesman) body.salesman = salesman;
     if ((id || numberTyped.current) && !optional) body.number = number;
     if (!id) body.clientKey = clientKey.current;
     if (overrideCredit) body.overrideCredit = true;
@@ -535,6 +545,30 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
     setType(t); setAccountId(null); setLines([blankItem()]); setTaxRows([blankTax()]); setCharges([blankCharge()]); setRoundOffText('');
     setAcc([blankAcc(JOURNAL_LIKE.includes(t) ? 'Dr' : 'Cr')]); setPartyId(null); setMode('item'); setAgainstId(null); setPdc(false);
   };
+
+  // The salesman follows the party (its ledger's salesman) until one is picked by hand.
+  const salesmanParty = inventory ? partyId : (acc.find((l) => l.ledgerId && isBillWise(l.ledgerId))?.ledgerId ?? null);
+  useEffect(() => {
+    if (salesmanSet.current) return;
+    setSalesman(ledgers.find((l) => l.id === salesmanParty)?.salesman ?? '');
+  }, [salesmanParty, ledgers]);
+  const showSalesman = WITH_SALESMAN.includes(type) && (salesmen.length > 0 || !!salesman);
+  const addSalesman = async (typed: string) => {
+    if (!typed.trim()) return;
+    try {
+      const s = await api.post('/api/salesmen', { name: typed });
+      setSalesmen((x) => [...x, s]); setSalesman(s.name); salesmanSet.current = true;
+      nav.toast(`Salesman "${s.name}" added`);
+    } catch (e: any) { nav.toast(e.message, true); }
+  };
+  const salesmanField = showSalesman && (
+    <div className="row"><label>Salesman</label>
+      <Combo name="Salesman" title="Salesmen (Alt+C adds one)" value={salesman || null} placeholder="None"
+        onChange={(v) => { setSalesman(v ?? ''); salesmanSet.current = true; }} onCreate={addSalesman}
+        onEmptyEnter={() => { setSalesman(''); salesmanSet.current = true; focusNext(document.activeElement as HTMLElement); }}
+        options={salesmen.filter((x) => x.active || x.name === salesman).map((x) => ({ id: x.name, label: x.name, meta: x.area }))} />
+    </div>
+  );
 
   // An opened voucher counts as changed only once something on it is typed or a line removed or added.
   const depth = nav.depth;
@@ -734,6 +768,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
               <Combo name="Party" title="List of Ledger Accounts" value={partyId} options={partyOptions} autoFocus={!id}
                 onChange={(v) => setPartyId(v)} onCreate={createParty} onAlter={alterLedger} />
             </div>
+            {salesmanField}
             {books && mode === 'item' && (
               <div className="row"><label>{type === 'sales' || type === 'credit_note' ? 'Sales ledger' : 'Purchase ledger'}</label>
                 <Combo name="Account" title="Ledgers" value={accountId} options={accountOptions} onChange={setAccountId} onAlter={alterLedger} />
@@ -862,6 +897,7 @@ export function VoucherForm({ type: initialType, id, copyFrom, active }: { type:
               <div className="row"><label>Account</label>
                 <Combo name="Account" title="Cash and Bank" value={accountId} options={cashBank} onChange={setAccountId} autoFocus={!id} onAlter={alterLedger} />
               </div>
+              {salesmanField}
               <div className="balance">{accountId ? `Current balance: ${drCr(ledgers.find((l) => l.id === accountId)?.balance ?? 0) || 'Nil'}` : ''}
                 {cheque.no && ` · Cheque ${cheque.no}${cheque.date ? ` dated ${cheque.date}` : ''}`}</div>
             </div>

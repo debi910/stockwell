@@ -238,11 +238,11 @@ describe('safe retries and backups', () => {
     const fs = await import('node:fs');
     const os = await import('node:os');
     const path = await import('node:path');
-    const { backup, checkBackupFile } = await import('../../src/server/app');
+    const { backupAll, checkBackupFile } = await import('../../src/server/app');
     const ctx = await setup();
     await seedDistributor(ctx.call);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-bk-'));
-    const { file } = await backup(ctx.books, dir);
+    const file = (await backupAll(ctx.books, dir)).local!;
     expect(checkBackupFile(file).company).toBe('Samal Distributors');
     expect(ctx.books.company().last_backup).not.toBe('');
     const junk = path.join(dir, 'junk.db');

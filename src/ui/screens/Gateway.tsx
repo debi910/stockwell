@@ -33,6 +33,16 @@ export function Gateway({ active }: { active: boolean }) {
             <span className="l">Current period</span><span>{shortDate(c.fy.start)} to {shortDate(c.fy.end)}</span>
             <span className="l">Current date</span><span>{shortDate(nav.workDate)}</span>
             <span className="l">Books from</span><span>{shortDate(c.books_from)}</span>
+            {alerts?.backup && isOwner(nav) && (
+              <>
+                <span className="l">Last backup</span>
+                <span>
+                  {alerts.backup.last ? new Date(alerts.backup.last).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Never'}
+                  {alerts.backup.cloudSet ? (alerts.backup.lastCloud ? ' · cloud copy too' : ' · no cloud copy yet') : ''}
+                  {(alerts.backup.stale || alerts.backup.error) && <> <button className="tag bad linkish" onClick={go('backup')} title={alerts.backup.error || ''}>Check backup</button></>}
+                </span>
+              </>
+            )}
           </div>
         </div>
         {alerts && (
@@ -103,6 +113,8 @@ export function CreateMenu() {
         { label: 'Stock Group (Company / Brand)', hot: 'S', run: go('stock-group-form') },
         { label: 'Unit', run: go('unit-form') },
         { label: 'Godown', hot: 'D', run: go('godowns') },
+        { section: 'Sales team' },
+        { label: 'Salesman', hot: 'M', run: go('salesman-form') },
       ]} />
     </div>
   );
@@ -120,6 +132,8 @@ export function AlterMenu() {
         { label: 'Stock Item', hot: 'I', run: go('item') },
         { label: 'GST rate of many items', hot: 'G', run: () => nav.push({ name: 'gst-rate' }) },
         { label: 'Godowns', hot: 'D', run: () => nav.push({ name: 'godowns' }) },
+        { section: 'Sales team' },
+        { label: 'Salesmen', hot: 'M', run: () => nav.push({ name: 'salesmen' }) },
       ]} />
     </div>
   );
@@ -140,7 +154,7 @@ export function ReportsMenu() {
         { label: 'Payables (Outstandings)', hot: 'P', run: go('outstanding', { kind: 'payable' }) },
         { label: 'Sales Register', hot: 'I', run: go('register', { type: 'sales' }) },
         { label: 'Purchase Register', hot: 'U', run: go('register', { type: 'purchase' }) },
-        { label: 'Sales by Beat / Salesman / Party', hot: 'B', run: go('sales-analysis') },
+        { label: 'Sales Analysis (Salesman / Area / Item / Month)', hot: 'B', run: go('sales-analysis') },
         { label: 'Post-dated Cheques', hot: 'Q', run: go('pdc') },
         ...ownerOnly([{ label: 'Bank Reconciliation', hot: 'K', run: go('bank-reco') }]),
         { section: 'Inventory' },

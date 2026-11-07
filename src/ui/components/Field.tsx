@@ -11,8 +11,9 @@ export function Row({ label, children, wide }: { label: string; children: ReactN
   );
 }
 
-export function Text({ value, onChange, name, autoFocus, placeholder, num, upper }: {
+export function Text({ value, onChange, name, autoFocus, placeholder, num, upper, onBlur }: {
   value: string | number | null | undefined; onChange: (v: string) => void; name?: string; autoFocus?: boolean; placeholder?: string; num?: boolean; upper?: boolean;
+  onBlur?: () => void;
 }) {
   return (
     <input
@@ -25,6 +26,7 @@ export function Text({ value, onChange, name, autoFocus, placeholder, num, upper
       autoComplete="off"
       onChange={(e) => onChange(upper ? e.target.value.toUpperCase() : e.target.value)}
       onFocus={(e) => e.currentTarget.select()}
+      onBlur={onBlur}
       onKeyDown={enterNext}
     />
   );

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
-import { api, downloadText, saveTextFile, desktop, setToken, whenLoggedOut } from './api';
+import { api, downloadText, saveTextFile, desktop, getToken, setToken, whenLoggedOut } from './api';
 import { DepthContext, KeyAction, Nav, NavContext, Screen, keyName, reportList } from './nav';
 import { VOUCHER_LABEL, parseDate, shortDate, todayISO } from './format';
 import { TYPE_KEYS } from './screens/Voucher';
@@ -58,6 +58,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
   const [askDate, setAskDate] = useState(false);
   const [calc, setCalc] = useState(false);
   const [conn, setConn] = useState<string>('');
+  const [pcs, setPcs] = useState(0);
   const handlers = useRef<Record<number, ((e: KeyboardEvent) => boolean | void) | null>>({});
 
   const refreshCompany = useCallback(async () => setCompany(await api.get('/api/company')), []);
@@ -111,8 +112,17 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
       const host = el.closest?.('[data-depth]');
       if (host && !el.closest('.modal') && el.matches('input, select, textarea, button, [tabindex]')) lastFocus.current[Number(host.getAttribute('data-depth'))] = el;
     };
+    // A click on a report's row puts the cursor on the list, so Enter then opens that row (not the period box).
+    const onRow = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (!el.closest?.('.report table.r tbody tr') || el.closest('input, select, textarea, button')) return;
+      const host = el.closest('[data-depth]');
+      const list = host ? reportList(host) : null;
+      if (list) setTimeout(() => list.focus(), 0);
+    };
     document.addEventListener('focusin', remember);
-    return () => document.removeEventListener('focusin', remember);
+    document.addEventListener('mousedown', onRow);
+    return () => { document.removeEventListener('focusin', remember); document.removeEventListener('mousedown', onRow); };
   }, []);
   const restoreFocus = useCallback(() => {
     const a = document.activeElement;
@@ -155,7 +165,8 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
       if (busy) return;
       busy = true;
       try {
-        const { v } = await api.get('/api/changes');
+        const { v, pcs } = await api.get('/api/changes');
+        setPcs(pcs ?? 0);
         if (seen >= 0 && v !== seen) window.dispatchEvent(new Event('stockwell:changed'));
         seen = v;
       } catch { /* the server is busy or restarting; try again next time */ } finally { busy = false; }
@@ -252,7 +263,7 @@ function Books({ user, onLogout }: { user: any; onLogout?: () => void }) {
         <footer className="statusbar">
           {conn ? (
             <button className="linkish" title="Change which PC keeps the books"
-              onClick={async () => { if (await confirmBox('Change this PC\'s setup (main PC, or connect to another PC)?\nStockwell will restart.')) window.stockwell?.resetConnection(); }}>{conn}</button>
+              onClick={async () => { if (await confirmBox('Change this PC\'s setup (main PC, or connect to another PC)?\nStockwell will restart.')) window.stockwell?.resetConnection(getToken()).catch((e) => nav.toast(String(e.message ?? e).replace(/^Error invoking remote method '\w+': (Error: )?/, ''), true)); }}>{conn}{pcs > 1 ? ` · ${pcs} PCs working` : ''}</button>
           ) : <span>Stockwell {meta.version ?? '0.2'}</span>}
           <span>Enter: next field · Ctrl+A: save · Alt+C: create · Esc: back</span>
         </footer>

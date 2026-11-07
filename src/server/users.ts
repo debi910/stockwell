@@ -156,7 +156,7 @@ function operatorBlocked(req: FastifyRequest, route: string, books: Books): stri
   if (m === 'DELETE') return 'Only an Owner can delete.';
   if (route.startsWith('/api/users')) return 'Only an Owner can manage users.';
   if (m === 'PUT' && route === '/api/company') return 'Only an Owner can change company settings.';
-  if (m === 'PUT' && (route === '/api/ledgers/:id' || route === '/api/items/:id')) return 'Only an Owner can alter masters. You can still create new ones.';
+  if (m === 'PUT' && (route === '/api/ledgers/:id' || route === '/api/items/:id' || route === '/api/salesmen/:id')) return 'Only an Owner can alter masters. You can still create new ones.';
   if (route === '/api/vouchers/:id/cancel') return 'Only an Owner can cancel a voucher.';
   if (m === 'PUT' && (route === '/api/vouchers/:id' || route === '/api/vouchers/:id/ewb')) {
     const v = books.db.prepare(`SELECT date FROM vouchers WHERE id=?`).get(id) as { date: string } | undefined;

@@ -1,7 +1,7 @@
 import type { ComponentType } from 'react';
 import type { Screen } from '../nav';
 import { AlterMenu, CreateMenu, Gateway, ReportsMenu } from './Gateway';
-import { GroupForm, ItemForm, LedgerForm, MasterList, StockGroupForm, UnitForm } from './Masters';
+import { GroupForm, ItemForm, LedgerForm, MasterList, SalesmanForm, SalesmenList, StockGroupForm, UnitForm } from './Masters';
 import { STOCK_TYPES, VoucherForm } from './Voucher';
 import { StockVoucherForm } from './StockVoucher';
 import { GoTo, VoucherTypesMenu } from './GoTo';
@@ -24,6 +24,8 @@ export const SCREENS: Record<string, ComponentType<any>> = {
   'group-form': GroupForm,
   'stock-group-form': StockGroupForm,
   'unit-form': UnitForm,
+  'salesman-form': SalesmanForm,
+  salesmen: SalesmenList,
   'master-list': MasterList,
   voucher: VoucherScreen,
   'voucher-types': VoucherTypesMenu,
@@ -59,7 +61,7 @@ export const SCREENS: Record<string, ComponentType<any>> = {
 
 const TITLES: Record<string, string> = {
   gateway: 'Gateway of Stockwell', 'create-menu': 'Create', 'alter-menu': 'Alter', 'reports-menu': 'Display More Reports',
-  'ledger-form': 'Ledger', 'item-form': 'Stock Item', 'group-form': 'Group', 'stock-group-form': 'Stock Group', 'unit-form': 'Unit',
+  'ledger-form': 'Ledger', 'item-form': 'Stock Item', 'group-form': 'Group', 'stock-group-form': 'Stock Group', 'unit-form': 'Unit', 'salesman-form': 'Salesman', salesmen: 'Salesmen',
   'master-list': 'List of Masters', 'day-book': 'Day Book', 'trial-balance': 'Trial Balance', 'group-summary': 'Group Summary',
   'profit-loss': 'Profit & Loss A/c', 'balance-sheet': 'Balance Sheet', 'ledger-report': 'Ledger Vouchers', 'stock-summary': 'Stock Summary',
   outstanding: 'Outstandings', alerts: 'Alerts & Reminders', audit: 'Edit Log', gst: 'GST Returns', company: 'Company',

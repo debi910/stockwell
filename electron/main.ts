@@ -5,12 +5,11 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { backup, buildApp, checkBackupFile, logError } from '../src/server/app';
+import { backupAll, backupDue, buildApp, checkBackupFile, logError } from '../src/server/app';
 import type { Books } from '../src/server/books';
-import { todayISO } from '../src/core/dates';
 
 const PORT = 7400;
-type Config = { mode: 'main' | 'client'; address?: string; lastBackup?: string };
+type Config = { mode: 'main' | 'client'; address?: string; /** Show the setup page again, with the current choice ready to keep. */ reconfigure?: boolean };
 
 const userData = app.getPath('userData');
 const configFile = path.join(userData, 'config.json');
@@ -103,20 +102,15 @@ function createWindow(preload: 'preload.cjs' | 'preload-setup.cjs') {
   return win;
 }
 
-async function daily(force = false) {
+/** The automatic backup: to the backup folder and the cloud folder, every few hours as set in Company (F3), and on closing. */
+async function autoBackup(force = false) {
   if (!books || closing) return;
-  const dir = books.company().backup_dir || defaultBackupDir;
-  if (!force && config?.lastBackup === todayISO()) return;
+  if (!force && !backupDue(books)) return;
   try {
-    await backup(books, dir);
-    config = { ...(config as Config), lastBackup: todayISO() };
-    writeConfig(config);
+    const r = await backupAll(books, defaultBackupDir);
+    if (r.errors.length) logError(errorLog, 'backup', new Error(r.errors.join(' ')));
   } catch (e) {
     logError(errorLog, 'backup', e);
-    // A pen drive that is not plugged in should not stop the daily copy: fall back to Documents.
-    if (dir !== defaultBackupDir) {
-      try { await backup(books, defaultBackupDir); } catch (e2) { logError(errorLog, 'backup (fallback)', e2); }
-    }
   }
 }
 
@@ -126,9 +120,9 @@ async function startMain() {
   books = built.books;
   await server.listen({ port: PORT, host: '0.0.0.0' });
 
-  // Daily backup: once a day while the app is open, and again when it closes.
-  daily();
-  setInterval(() => daily(), 60 * 60 * 1000);
+  // Automatic backup: checked every 15 minutes, done as often as Company settings say, and again when Stockwell closes.
+  autoBackup();
+  setInterval(() => autoBackup(), 15 * 60 * 1000);
   return `http://127.0.0.1:${PORT}`;
 }
 
@@ -136,7 +130,7 @@ app.on('before-quit', async (e) => {
   if (closing || !server) return;
   e.preventDefault();
   try {
-    await withTimeout(daily(true), 20_000, 'Closing backup');
+    await withTimeout(autoBackup(true), 30_000, 'Closing backup');
   } catch (err) { logError(errorLog, 'closing backup', err); }
   closing = true;
   try { await withTimeout(server.close(), 10_000, 'Closing the books'); } // closes the database cleanly
@@ -148,6 +142,11 @@ async function open() {
   if (!config) {
     const w = createWindow('preload-setup.cjs');
     await w.loadFile(setupPage);
+    return;
+  }
+  if (config.reconfigure) {
+    const w = createWindow('preload-setup.cjs');
+    await w.loadFile(setupPage, { query: { current: config.mode, address: config.address ?? '' } });
     return;
   }
   try {
@@ -234,9 +233,16 @@ ipcMain.handle('connection', async (e) => {
   };
 });
 
-ipcMain.handle('resetConnection', async (e) => {
+ipcMain.handle('resetConnection', async (e, token: string | null) => {
   fromBooks(e);
-  fs.rmSync(configFile, { force: true });
+  // On the main PC, with logins on, only an Owner may move the books' home (the other PCs depend on it).
+  if (config?.mode === 'main' && server) {
+    const s = await server.inject({ method: 'GET', url: '/api/session', headers: token ? { 'x-stockwell-token': String(token) } : {} });
+    const session = JSON.parse(s.body);
+    if (session.usersEnabled && session.user?.role !== 'owner') throw new Error('Only an Owner can change the main PC.');
+  }
+  // The books on this PC stay where they are; choosing "main PC" again later opens them as before.
+  writeConfig({ ...(config ?? { mode: 'main' }), reconfigure: true });
   app.relaunch();
   app.quit(); // runs the closing backup first
 });

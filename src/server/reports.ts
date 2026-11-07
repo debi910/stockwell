@@ -79,7 +79,7 @@ export function stockSummary(books: Books, asOf: string, from?: string): StockRo
   const items = books.db.prepare(`
     SELECT i.*, u.symbol AS unit, sg.name AS stock_group FROM items i JOIN units u ON u.id=i.unit_id
     LEFT JOIN stock_groups sg ON sg.id=i.stock_group_id ORDER BY sg.name, i.name`).all() as
-    { id: number; name: string; unit: string; stock_group: string | null; hsn: string; gst_rate: number; opening_qty: number; opening_value: number; reorder_level: number }[];
+    { id: number; name: string; unit: string; stock_group: string | null; hsn: string; gst_rate: number; opening_qty: number; opening_value: number; opening_date: string | null; reorder_level: number }[];
   const move = books.db.prepare(`
     SELECT
       COALESCE(SUM(CASE WHEN iv.direction>0 AND v.date<? THEN iv.qty+iv.free_qty END),0) AS in_before,
@@ -93,13 +93,17 @@ export function stockSummary(books: Books, asOf: string, from?: string): StockRo
   const start = from ?? '0000-01-01';
   return items.map((i) => {
     const m = move.get(start, start, start, start, i.id, asOf) as Record<string, number>;
-    const opening = i.opening_qty + m.in_before - m.out_before;
-    const closing = opening + m.inward - m.outward;
-    const costQty = i.opening_qty + m.bought_qty;
-    const rate = costQty > 0 ? (i.opening_value + m.bought_value) / costQty : 0;
+    // Opening stock counts from its own date: before the period it is part of the opening, inside it it comes in.
+    const od = i.opening_date ?? '0000-01-01';
+    const counted = od <= asOf;
+    const opening = (od < start ? i.opening_qty : 0) + m.in_before - m.out_before;
+    const inward = m.inward + (counted && od >= start ? i.opening_qty : 0);
+    const closing = opening + inward - m.outward;
+    const costQty = (counted ? i.opening_qty : 0) + m.bought_qty;
+    const rate = costQty > 0 ? ((counted ? i.opening_value : 0) + m.bought_value) / costQty : 0;
     return {
       id: i.id, name: i.name, unit: i.unit, stock_group: i.stock_group, hsn: i.hsn, gst_rate: i.gst_rate,
-      opening_qty: round3(opening), inward: round3(m.inward), outward: round3(m.outward), closing_qty: round3(closing),
+      opening_qty: round3(opening), inward: round3(inward), outward: round3(m.outward), closing_qty: round3(closing),
       rate: Math.round(rate), value: Math.round(closing * rate), reorder_level: i.reorder_level,
     };
   });
@@ -111,8 +115,10 @@ export function stockValue(books: Books, asOf: string): number {
   return stockSummary(books, asOf).reduce((a, r) => a + r.value, 0);
 }
 
-export function openingStockValue(books: Books): number {
-  return (books.db.prepare(`SELECT COALESCE(SUM(opening_value),0) v FROM items`).get() as { v: number }).v;
+/** Value of the opening stock entered on items, counting only items whose opening date falls between the two dates
+ *  (no date = the books start, so always counted). */
+export function openingStockValue(books: Books, upTo = '9999-12-31', from = '0000-01-01'): number {
+  return (books.db.prepare(`SELECT COALESCE(SUM(opening_value),0) v FROM items WHERE COALESCE(opening_date,'0000-01-01') BETWEEN ? AND ?`).get(from, upTo) as { v: number }).v;
 }
 
 // ---------- statements ----------
@@ -121,7 +127,7 @@ export function trialBalance(books: Books, asOf: string) {
   const booksFrom = books.company().books_from;
   const balances = yearBalances(books, asOf);
   const tree = groupTree(books, balances);
-  const openingStockBooks = openingStockValue(books);
+  const openingStockBooks = openingStockValue(books, asOf);
   // From the second year on, earlier years' result sits in the Profit & Loss A/c line, and the year
   // opens with the stock that was on hand at its start (as in Tally).
   let profitLossAc = 0;
@@ -129,7 +135,8 @@ export function trialBalance(books: Books, asOf: string) {
   if (start > booksFrom) {
     const ie = new Set((books.db.prepare(INCOME_EXPENSE).all() as { id: number }[]).map((r) => r.id));
     const earlierIE = ledgerBalances(books, addDays(start, -1)).filter((b) => ie.has(b.id)).reduce((a, b) => a + b.balance, 0);
-    openingStock = stockValue(books, addDays(start, -1));
+    // Items whose opening stock is dated inside this year open the year with it.
+    openingStock = stockValue(books, addDays(start, -1)) + openingStockValue(books, asOf, start);
     profitLossAc = earlierIE + openingStockBooks - openingStock; // +Dr: a loss; -Cr: a profit
   }
   const dr = balances.filter((b) => b.balance > 0).reduce((a, b) => a + b.balance, 0) + Math.max(0, profitLossAc);
@@ -148,7 +155,8 @@ export function profitAndLoss(books: Books, from: string, to: string) {
   const byId = new Map(groups.map((g) => [g.id, g]));
   const tree = groupTree(books, balances, (g) => g.nature === 'income' || g.nature === 'expense');
   const direct = (n: GroupNode) => !!byId.get(n.id)?.direct;
-  const openingStock = from <= books.company().books_from ? openingStockValue(books) : stockValue(books, addDays(from, -1));
+  // Opening stock dated inside the period is part of the period's opening stock, so it never shows as profit.
+  const openingStock = from <= books.company().books_from ? openingStockValue(books, to) : stockValue(books, addDays(from, -1)) + openingStockValue(books, to, from);
   const closingStock = stockValue(books, to);
   const tradingDr = sumNature(tree, (n) => n.nature === 'expense' && direct(n));
   const tradingCr = sumNature(tree, (n) => n.nature === 'income' && direct(n));
@@ -170,7 +178,7 @@ export function balanceSheet(books: Books, asOf: string) {
   const tree = groupTree(books, balances, (g) => g.nature === 'asset' || g.nature === 'liability');
   const liabilities = tree.filter((n) => n.nature === 'liability');
   const assets = tree.filter((n) => n.nature === 'asset');
-  const openingStock = openingStockValue(books);
+  const openingStock = openingStockValue(books, asOf);
   const openingDiff = (books.db.prepare(`SELECT COALESCE(SUM(opening),0) s FROM ledgers`).get() as { s: number }).s + openingStock;
   const totalLiab = -liabilities.reduce((a, n) => a + n.balance, 0) + pl.netProfit + earlier + (openingDiff > 0 ? openingDiff : 0);
   const totalAssets = assets.reduce((a, n) => a + n.balance, 0) + pl.closingStock + (openingDiff < 0 ? -openingDiff : 0);
@@ -202,8 +210,8 @@ export function ledgerStatement(books: Books, ledgerId: number, from: string, to
   return { ledger: l, from, to, opening, lines, closing: running };
 }
 
-export function dayBook(books: Books, from: string, to: string) {
-  return books.vouchers({ from, to });
+export function dayBook(books: Books, from: string, to: string, salesman?: string) {
+  return books.vouchers({ from, to, salesman });
 }
 
 // ---------- alerts ----------
@@ -268,8 +276,15 @@ export function alerts(books: Books, asOf = todayISO()) {
 
   const lowStock = stockSummary(books, asOf).filter((s) => s.reorder_level > 0 && s.closing_qty <= s.reorder_level);
 
+  // Backup health, so a pen drive left out or a stopped Google Drive is noticed on the Gateway, not on the day the copy is needed.
+  const hoursSince = (iso: string) => (iso ? (Date.now() - new Date(iso).getTime()) / 3600_000 : Infinity);
+  const backup = {
+    last: company.last_backup, lastCloud: company.last_cloud_backup, cloudSet: !!company.cloud_backup_dir, error: company.backup_error,
+    stale: hoursSince(company.last_backup) > 48 || (!!company.cloud_backup_dir && hoursSince(company.last_cloud_backup) > 48),
+  };
   return {
     asOf,
+    backup,
     overdue,
     overdueTotal: overdue.reduce((a, b) => a + b.pending, 0),
     msmeReceivables,
@@ -284,12 +299,12 @@ export function alerts(books: Books, asOf = todayISO()) {
 const LIVE = `v.cancelled=0 AND v.optional=0`;
 
 /** Sales/Purchase/... Register: month-wise totals and the vouchers, as Tally's Display → Account Books → Sales Register. */
-export function register(books: Books, type: string, from: string, to: string) {
+export function register(books: Books, type: string, from: string, to: string, salesman?: string) {
   const rows = books.db.prepare(`
-    SELECT v.id, v.number, v.date, v.ref_no, p.name AS party, COALESCE(v.party_gstin,'') AS gstin, v.taxable, v.cgst, v.sgst, v.igst,
+    SELECT v.id, v.number, v.date, v.ref_no, p.name AS party, v.salesman, COALESCE(v.party_gstin,'') AS gstin, v.taxable, v.cgst, v.sgst, v.igst,
       v.charges, v.round_off, v.total, v.cancelled
     FROM vouchers v LEFT JOIN ledgers p ON p.id=v.party_id
-    WHERE v.type=? AND v.optional=0 AND v.date BETWEEN ? AND ? ORDER BY v.date, v.seq, v.id`).all(type, from, to) as
+    WHERE v.type=? AND v.optional=0 AND v.date BETWEEN ? AND ? AND (? IS NULL OR v.salesman=? COLLATE NOCASE) ORDER BY v.date, v.seq, v.id`).all(type, from, to, salesman ?? null, salesman ?? null) as
     { id: number; number: string; date: string; ref_no: string; party: string; gstin: string; taxable: number; cgst: number; sgst: number; igst: number; charges: number; round_off: number; total: number; cancelled: number }[];
   const months = new Map<string, { month: string; count: number; taxable: number; tax: number; total: number }>();
   for (const r of rows) {
@@ -305,35 +320,77 @@ export function register(books: Books, type: string, from: string, to: string) {
   };
 }
 
-/** Sales net of credit notes, grouped by beat, salesman, party, item or stock group (brand/company). */
-export function salesBy(books: Books, by: string, from: string, to: string) {
+export interface SalesFilter { salesman?: string; beat?: string; partyId?: number; itemId?: number; stockGroupId?: number }
+
+/** Sales net of credit notes, grouped by salesman, area (beat), party, item, brand (stock group) or month, and narrowed by
+ *  any of the same (e.g. one salesman's sales, item by item). Like Marg's salesman-wise analysis.
+ *  A bill counts for the salesman written on it; older bills without one count for the party's salesman. */
+export function salesBy(books: Books, by: string, from: string, to: string, f: SalesFilter = {}) {
+  const SALESMAN = `COALESCE(NULLIF(v.salesman,''), NULLIF(p.salesman,''), '(no salesman)')`;
+  const BEAT = `COALESCE(NULLIF(p.beat,''),'(no area)')`;
   const col: Record<string, string> = {
-    beat: `COALESCE(NULLIF(p.beat,''),'(no beat)')`, salesman: `COALESCE(NULLIF(p.salesman,''),'(no salesman)')`, party: 'p.name',
+    salesman: SALESMAN, beat: BEAT, party: `COALESCE(p.name,'(no party)')`, month: `substr(v.date,1,7)`,
     item: 'i.name', stock_group: `COALESCE(sg.name,'(no group)')`,
   };
-  const c = col[by] ?? col.party;
-  const itemLevel = by === 'item' || by === 'stock_group';
-  const rows = itemLevel
+  if (!(by in col)) by = 'party';
+  const c = col[by];
+  const where: string[] = [LIVE, `v.type IN ('sales','credit_note')`, 'v.date BETWEEN @from AND @to'];
+  const args: Record<string, unknown> = { from, to };
+  if (f.salesman) { where.push(`${SALESMAN}=@salesman COLLATE NOCASE`); args.salesman = f.salesman; }
+  if (f.beat) { where.push(`${BEAT}=@beat COLLATE NOCASE`); args.beat = f.beat; }
+  if (f.partyId) { where.push('v.party_id=@party'); args.party = f.partyId; }
+  if (f.itemId) { where.push('iv.item_id=@item'); args.item = f.itemId; }
+  if (f.stockGroupId) { where.push('i.stock_group_id=@sg'); args.sg = f.stockGroupId; }
+  // Item-wise figures come from the bill lines; party-level ones from the bills (which also covers bills in accounting mode).
+  const itemLevel = by === 'item' || by === 'stock_group' || !!f.itemId || !!f.stockGroupId;
+  const rows = (itemLevel
     ? books.db.prepare(`
       SELECT ${c} AS name, SUM(CASE WHEN v.type='sales' THEN iv.qty + iv.free_qty ELSE -(iv.qty + iv.free_qty) END) AS qty,
-        SUM(CASE WHEN v.type='sales' THEN iv.taxable ELSE -iv.taxable END) AS value, COUNT(DISTINCT v.id) AS bills
+        SUM(CASE WHEN v.type='sales' THEN iv.taxable ELSE -iv.taxable END) AS value,
+        SUM(CASE WHEN v.type='sales' THEN iv.taxable + iv.cgst + iv.sgst + iv.igst ELSE -(iv.taxable + iv.cgst + iv.sgst + iv.igst) END) AS total,
+        COUNT(DISTINCT CASE WHEN v.type='sales' THEN v.id END) AS bills
       FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id JOIN items i ON i.id=iv.item_id LEFT JOIN stock_groups sg ON sg.id=i.stock_group_id
       LEFT JOIN ledgers p ON p.id=v.party_id
-      WHERE ${LIVE} AND v.type IN ('sales','credit_note') AND v.date BETWEEN ? AND ? GROUP BY 1 ORDER BY value DESC`).all(from, to)
+      WHERE ${where.join(' AND ')} GROUP BY 1 ORDER BY ${by === 'month' ? 'name' : 'value DESC'}`).all(args)
     : books.db.prepare(`
       SELECT ${c} AS name, SUM(CASE WHEN v.type='sales' THEN v.taxable ELSE -v.taxable END) AS value,
         SUM(CASE WHEN v.type='sales' THEN v.total ELSE -v.total END) AS total, SUM(v.type='sales') AS bills
-      FROM vouchers v JOIN ledgers p ON p.id=v.party_id
-      WHERE ${LIVE} AND v.type IN ('sales','credit_note') AND v.date BETWEEN ? AND ? GROUP BY 1 ORDER BY value DESC`).all(from, to);
-  // Money still due, by the same grouping (parties only).
+      FROM vouchers v LEFT JOIN ledgers p ON p.id=v.party_id
+      WHERE ${where.join(' AND ')} GROUP BY 1 ORDER BY ${by === 'month' ? 'name' : 'value DESC'}`).all(args)) as { name: string; value: number; total: number; bills: number; qty?: number }[];
+
+  // Money collected (receipts from parties) and still due, by the same grouping, for party-level views.
+  let collected: Map<string, number> | null = null;
   let due: Map<string, number> | null = null;
-  if (!itemLevel) {
+  if (!itemLevel && by !== 'month') {
+    collected = new Map();
+    const rw = [LIVE, `v.type='receipt'`, 'v.date BETWEEN @from AND @to', 'e.amount<0', `g.name IN ('Sundry Debtors','Sundry Creditors')`];
+    if (f.salesman) rw.push(`${SALESMAN}=@salesman COLLATE NOCASE`);
+    if (f.beat) rw.push(`${BEAT}=@beat COLLATE NOCASE`);
+    if (f.partyId) rw.push('p.id=@party');
+    const rec = books.db.prepare(`
+      SELECT ${c} AS name, -SUM(e.amount) AS amount FROM entries e JOIN vouchers v ON v.id=e.voucher_id
+      JOIN ledgers p ON p.id=e.ledger_id JOIN groups g ON g.id=p.group_id
+      WHERE ${rw.join(' AND ')} GROUP BY 1`).all(args) as { name: string; amount: number }[];
+    for (const r of rec) collected.set(r.name, r.amount);
     due = new Map();
     const keyOf = (b: { beat: string; salesman: string; ledger_name: string }) =>
-      by === 'beat' ? b.beat || '(no beat)' : by === 'salesman' ? b.salesman || '(no salesman)' : b.ledger_name;
-    for (const b of books.pendingBills({ asOf: to }).filter((x) => x.pending > 0)) due.set(keyOf(b), (due.get(keyOf(b)) ?? 0) + b.pending);
+      by === 'beat' ? b.beat || '(no area)' : by === 'salesman' ? b.salesman || '(no salesman)' : b.ledger_name;
+    for (const b of books.pendingBills({ asOf: to })) {
+      if (!(b.pending > 0)) continue;
+      if (f.salesman && (b.salesman || '').toLowerCase() !== f.salesman.toLowerCase()) continue;
+      if (f.beat && (b.beat || '(no area)').toLowerCase() !== f.beat.toLowerCase()) continue;
+      if (f.partyId && b.ledger_id !== f.partyId) continue;
+      due.set(keyOf(b), (due.get(keyOf(b)) ?? 0) + b.pending);
+    }
   }
-  return { by, from, to, rows: (rows as Record<string, unknown>[]).map((r) => ({ ...r, outstanding: due?.get(r.name as string) ?? 0 })) };
+  const out = rows.map((r) => ({ ...r, collected: collected?.get(r.name) ?? 0, outstanding: due?.get(r.name) ?? 0 }));
+  // A salesman who only collected money this period still shows.
+  if (collected) for (const [name, amount] of collected) if (!out.some((r) => r.name === name)) out.push({ name, value: 0, total: 0, bills: 0, collected: amount, outstanding: due?.get(name) ?? 0 });
+  const sum = (k: 'value' | 'total' | 'bills' | 'collected' | 'outstanding') => out.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  return {
+    by, from, to, filter: f, itemLevel, rows: out,
+    totals: { value: sum('value'), total: sum('total'), bills: by === 'item' || by === 'stock_group' ? null : sum('bills'), collected: sum('collected'), outstanding: sum('outstanding'), qty: itemLevel ? Math.round(out.reduce((a, r) => a + (Number(r.qty) || 0), 0) * 1000) / 1000 : null },
+  };
 }
 
 /** Stock in each godown on a date. */
@@ -343,9 +400,9 @@ export function godownStock(books: Books, asOf: string) {
     SELECT i.id, i.name, u.symbol AS unit, COALESCE(iv.godown_id,1) AS godown_id, SUM(iv.direction * (iv.qty + iv.free_qty)) AS qty
     FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id JOIN items i ON i.id=iv.item_id JOIN units u ON u.id=i.unit_id
     WHERE ${LIVE} AND v.date<=? GROUP BY i.id, 4`).all(asOf) as { id: number; name: string; unit: string; godown_id: number; qty: number }[];
-  const items = books.db.prepare(`SELECT i.id, i.name, u.symbol AS unit, i.opening_qty FROM items i JOIN units u ON u.id=i.unit_id ORDER BY i.name`).all() as { id: number; name: string; unit: string; opening_qty: number }[];
+  const items = books.db.prepare(`SELECT i.id, i.name, u.symbol AS unit, i.opening_qty, i.opening_date FROM items i JOIN units u ON u.id=i.unit_id ORDER BY i.name`).all() as { id: number; name: string; unit: string; opening_qty: number; opening_date: string | null }[];
   const out = items.map((i) => {
-    const by: Record<number, number> = { 1: i.opening_qty };
+    const by: Record<number, number> = { 1: !i.opening_date || i.opening_date <= asOf ? i.opening_qty : 0 };
     for (const r of rows.filter((x) => x.id === i.id)) by[r.godown_id] = Math.round(((by[r.godown_id] ?? 0) + r.qty) * 1000) / 1000;
     return { id: i.id, name: i.name, unit: i.unit, godowns: by };
   }).filter((r) => Object.values(r.godowns).some((q) => q !== 0));

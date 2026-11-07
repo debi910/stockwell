@@ -75,7 +75,8 @@ interface Bridge {
   showInFolder(path: string): Promise<void>;
   chooseFolder(): Promise<string | null>;
   connection(): Promise<{ mode: 'main' | 'client'; address: string; lanAddresses: string[]; dataDir?: string }>;
-  resetConnection(): Promise<void>;
+  /** Opens the setup page again (main PC or connect to it); on the main PC an Owner's login is needed. */
+  resetConnection(token: string | null): Promise<void>;
   /** Only on the main PC. */
   restore?(token: string | null): Promise<void>;
 }

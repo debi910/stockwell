@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, desktop, openExternal, saveTextFile, setToken, getToken } from '../api';
 import { Row, Select, Text } from '../components/Field';
-import { promptBox } from '../components/Dialog';
+import { confirmBox, promptBox } from '../components/Dialog';
 import { useKeyBar, useNav, useScreenKeys, useTitle } from '../nav';
 import { formatINR, rupeesText, shortDate, toPaise } from '../format';
 
@@ -27,6 +27,7 @@ export function CompanySettings() {
         ewb_threshold: toPaise(Number(ewb_rupees) || 0),
         msme_interest_rate: Number(c.msme_interest_rate) || 0,
         expiry_alert_days: Number(c.expiry_alert_days) || 0,
+        backup_every_hours: Number(c.backup_every_hours) || 0,
       });
       await nav.refreshCompany();
       nav.toast('Company details saved');
@@ -34,7 +35,22 @@ export function CompanySettings() {
     } catch (e: any) { nav.toast(e.message, true); }
   }, [c, nav]);
   useSave(save);
-  const pickFolder = async () => { const d = await desktop?.chooseFolder(); if (d) set('backup_dir')(d); };
+  // Backups are made by the main PC, so folders are picked there (a folder on this PC means nothing to the main PC).
+  const [mode, setMode] = useState<'main' | 'client' | ''>('');
+  useEffect(() => { desktop?.connection().then((x) => setMode(x.mode)).catch(() => {}); }, []);
+  const onMain = !desktop || mode === 'main';
+  const pickFolder = (k: string) => async () => { const d = await desktop?.chooseFolder(); if (d) set(k)(d); };
+  const [clouds, setClouds] = useState<{ name: string; path: string }[] | null>(null);
+  const findCloud = async () => {
+    const found = await api.get('/api/backup/cloud-folders');
+    setClouds(found);
+    if (found.length === 1) { set('cloud_backup_dir')(found[0].path); nav.toast(`${found[0].name} found. Press Ctrl+A to keep it.`); }
+    else if (!found.length) nav.toast('No Google Drive folder on the main PC. Install "Google Drive for desktop", sign in with the firm\'s Gmail, then try again.', true);
+  };
+  const changePc = async () => {
+    if (!(await confirmBox('Change how this PC works (main PC, or connected to the main PC)?\nStockwell will restart and show the choice. The books on this PC are not deleted.'))) return;
+    try { await desktop!.resetConnection(getToken()); } catch (e: any) { nav.toast(String(e.message ?? e).replace(/^Error invoking remote method '\w+': (Error: )?/, ''), true); }
+  };
   return (
     <div className="form" data-form>
       <h2>Company details</h2>
@@ -62,11 +78,42 @@ export function CompanySettings() {
         <Row label="Books begin from"><Text name="Books from" value={c.books_from} onChange={set('books_from')} placeholder="YYYY-MM-DD" /></Row>
         <Row label="Backup folder">
           <div style={{ display: 'flex', gap: 6 }}>
-            <Text name="Backup folder" value={c.backup_dir} onChange={set('backup_dir')} placeholder="e.g. D:\Stockwell Backup" />
-            {desktop && <button className="btn small" onClick={pickFolder}>Choose…</button>}
+            <Text name="Backup folder" value={c.backup_dir} onChange={set('backup_dir')} placeholder={c.default_backup_dir || 'e.g. D:\\Stockwell Backup'} />
+            {desktop && onMain && <button className="btn small" onClick={pickFolder('backup_dir')}>Choose…</button>}
           </div>
         </Row>
+        <Row label="Cloud backup folder">
+          <div style={{ display: 'flex', gap: 6 }}>
+            <Text name="Cloud backup folder" value={c.cloud_backup_dir} onChange={set('cloud_backup_dir')} placeholder={"e.g. G:\\My Drive\\Stockwell Backups"} />
+            <button className="btn small" onClick={findCloud}>Find Google Drive</button>
+            {desktop && onMain && <button className="btn small" onClick={pickFolder('cloud_backup_dir')}>Choose…</button>}
+          </div>
+        </Row>
+        {clouds && clouds.length > 1 && (
+          <Row label="Found">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {clouds.map((f) => <button key={f.path} className="btn small" onClick={() => set('cloud_backup_dir')(f.path)}>{f.name}: {f.path}</button>)}
+            </div>
+          </Row>
+        )}
+        <Row label="Back up every">
+          <Select name="Back up every" value={String(c.backup_every_hours ?? 4)} onChange={set('backup_every_hours')}
+            options={[['1', '1 hour'], ['2', '2 hours'], ['4', '4 hours'], ['8', '8 hours'], ['12', '12 hours'], ['0', 'Once a day']].map(([value, label]) => ({ value, label }))} />
+        </Row>
+        {desktop && (
+          <Row label="This PC">
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <b>{mode === 'main' ? 'Main PC (keeps the books)' : mode === 'client' ? 'Connected to the main PC' : ''}</b>
+              <button className="btn small" onClick={changePc}>Change…</button>
+            </div>
+          </Row>
+        )}
       </div>
+      <p className="hint">
+        Backups are made on the main PC, also when Stockwell closes, and each copy is checked. For a free cloud copy, install
+        Google Drive for desktop on the main PC and sign in with the firm's Gmail: Stockwell puts a copy in its folder and Google Drive uploads it.
+        {!onMain && ' The folders are on the main PC; change them there.'}
+      </p>
       <p className="hint">
         The interest rate is three times the RBI bank rate under the MSMED Act; Stockwell uses it to show interest on late MSME bills.
         Odisha needs an e-Way Bill above ₹50,000 for movement inside the state, so keep that limit unless the rule changes.
@@ -432,8 +479,13 @@ export function BackupScreen() {
   useTitle('Backup');
   const run = useCallback(async () => {
     setBusy(true);
-    try { const r = await api.post('/api/backup', {}); setLast(r.file); nav.toast('Backup done'); } catch (e: any) { nav.toast(e.message, true); } finally { setBusy(false); }
-  }, []);
+    try {
+      const r = await api.post('/api/backup', {});
+      setLast([r.local, r.cloud].filter(Boolean).join('  and  '));
+      await nav.refreshCompany();
+      if (r.errors.length) nav.toast(`Backup made, but: ${r.errors.join(' ')}`, true); else nav.toast(r.cloud ? 'Backup done, also in the cloud folder' : 'Backup done');
+    } catch (e: any) { nav.toast(e.message, true); } finally { setBusy(false); }
+  }, [nav]);
   const restore = useCallback(async () => {
     try { await desktop!.restore!(getToken()); } catch (e: any) { nav.toast(e.message?.replace(/^Error invoking remote method '\w+': (Error: )?/, '') ?? String(e), true); }
   }, []);
@@ -445,7 +497,10 @@ export function BackupScreen() {
       <h2>Backup</h2>
       <Row label="Backup folder">{dir ? <b>{dir}</b> : <span className="tag warn">Not chosen. Set it in Company settings (F3).</span>}</Row>
       <Row label="Last backup">{nav.company.last_backup ? <b>{new Date(nav.company.last_backup).toLocaleString('en-IN')}</b> : <span className="tag warn">Never</span>}</Row>
-      <p className="hint">Stockwell backs up by itself once a day on the main PC and when it closes. Each copy is checked after it is made. It keeps the last 30 copies plus one per month for two years.
+      <Row label="Cloud folder">{nav.company.cloud_backup_dir ? <b>{nav.company.cloud_backup_dir}</b> : <span className="tag warn">Not set. Set it in Company settings (F3).</span>}</Row>
+      {nav.company.cloud_backup_dir && <Row label="Last cloud backup">{nav.company.last_cloud_backup ? <b>{new Date(nav.company.last_cloud_backup).toLocaleString('en-IN')}</b> : <span className="tag warn">Never</span>}</Row>}
+      {nav.company.backup_error && <p className="tag bad" style={{ display: 'block', padding: 8 }}>Last backup problem: {nav.company.backup_error}</p>}
+      <p className="hint">Stockwell backs up by itself on the main PC {Number(nav.company.backup_every_hours) ? `every ${nav.company.backup_every_hours} hours` : 'once a day'} and when it closes. Each copy is checked after it is made. Each folder keeps the last 30 copies plus one per month for two years.
         {!nav.company.backup_dir && ' The copies are on this same hard disk now; choose a pen drive or a Google Drive folder in Company settings so a dead disk does not take the books with it.'}</p>
       <div className="actions" style={{ justifyContent: 'flex-start' }}>
         <button className="btn primary go" disabled={busy || !dir} onClick={run} autoFocus>{busy ? 'Backing up…' : 'Back up now (Ctrl+A)'}</button>

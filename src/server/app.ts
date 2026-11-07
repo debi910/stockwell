@@ -70,10 +70,13 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     }
     const p = (req.params ?? {}) as Record<string, unknown>;
     for (const [k, v] of Object.entries(p)) if (/id$/i.test(k) && !/^\d+$/.test(String(v))) throw new BooksError('That entry was not found.');
+    for (const k of ['ledgerId', 'partyId', 'itemId', 'stockGroupId']) if (q[k] !== undefined && q[k] !== '' && !/^\d+$/.test(String(q[k]))) throw new BooksError('That entry was not found.');
   });
   const users = installAuth(app, books);
 
   const num = (v: string | undefined) => (v === undefined || v === '' ? undefined : Number(v));
+  /** A text filter from the address: blank means no filter. */
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 100) : undefined);
   const asOf = (q: Q) => q.to || q.asOf || todayISO();
 
   // ----- reference data -----
@@ -85,15 +88,28 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return payload;
   });
   app.get('/api/meta', async () => ({
-    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.2.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
+    states: STATES, gstRates: GST_RATES, voucherTypes: VOUCHER_TYPES, today: todayISO(), version: '0.3.0', godowns: books.godowns(), priceLevels: books.priceLevels(),
   }));
   // Every change to the books writes an edit-log row, so its newest id tells open screens on any PC that something changed.
-  app.get('/api/changes', async () => ({ v: (books.db.prepare(`SELECT COALESCE(MAX(id),0) AS v FROM audit`).get() as { v: number }).v }));
+  // Each open Stockwell asks every few seconds, which also tells the main PC how many PCs are working now.
+  const lastSeen = new Map<string, number>();
+  app.get('/api/changes', async (req) => {
+    const now = Date.now();
+    lastSeen.set(req.ip, now);
+    for (const [ip, t] of lastSeen) if (now - t > 20_000) lastSeen.delete(ip);
+    return { v: (books.db.prepare(`SELECT COALESCE(MAX(id),0) AS v FROM audit`).get() as { v: number }).v, pcs: lastSeen.size };
+  });
   app.get('/api/company', async () => ({ ...books.company(), fy: financialYear(todayISO()), default_backup_dir: opts.defaultBackupDir ?? '' }));
   app.put('/api/company', async (req) => books.updateCompany(req.body as Record<string, never>));
 
   // ----- accounting masters -----
   app.get('/api/groups', async () => books.groups());
+  app.get('/api/salesmen', async () => books.salesmen());
+  // Areas (beats/routes) already used on parties, for the pick lists.
+  app.get('/api/areas', async () => (books.db.prepare(`SELECT DISTINCT beat AS name FROM ledgers WHERE TRIM(COALESCE(beat,''))<>'' ORDER BY beat COLLATE NOCASE`).all() as { name: string }[]).map((r) => r.name));
+  app.post('/api/salesmen', async (req) => books.createSalesman(req.body as Record<string, unknown>));
+  app.put('/api/salesmen/:id', async (req) => books.updateSalesman(Number((req.params as Q).id), req.body as Record<string, unknown>));
+  app.delete('/api/salesmen/:id', async (req) => books.deleteSalesman(Number((req.params as Q).id)));
   app.post('/api/groups', async (req) => books.createGroup(req.body as { name: string; parentId: number }));
   app.get('/api/ledgers', async () => {
     const balances = new Map(R.yearBalances(books, todayISO()).map((b) => [b.id, b.balance]));
@@ -220,7 +236,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   app.get('/api/reports/day-book', async (req) => {
     const q = req.query as Q;
     const to = asOf(q);
-    return R.dayBook(books, q.from || to, to);
+    return R.dayBook(books, q.from || to, to, text(q.salesman));
   });
   app.get('/api/reports/stock-summary', async (req) => {
     const q = req.query as Q;
@@ -230,7 +246,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const q = req.query as Q;
     const bills = books.pendingBills({ asOf: asOf(q), ledgerId: num(q.ledgerId) });
     const kind = q.kind ?? 'receivable';
-    return bills.filter((b) => (kind === 'receivable' ? b.pending > 0 : b.pending < 0));
+    const sm = text(q.salesman)?.toLowerCase();
+    return bills.filter((b) => (kind === 'receivable' ? b.pending > 0 : b.pending < 0) && (!sm || (b.salesman || '').toLowerCase() === sm));
   });
   app.get('/api/reports/pending-bills/:ledgerId', async (req) => books.pendingBills({ ledgerId: Number((req.params as Q).ledgerId), asOf: (req.query as Q).asOf || undefined }));
   app.get('/api/reports/alerts', async (req) => R.alerts(books, asOf(req.query as Q)));
@@ -238,8 +255,11 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const to = asOf(q);
     return { from: q.from || maxDate(financialYear(to).start, books.company().books_from), to };
   };
-  app.get('/api/reports/register', async (req) => { const q = req.query as Q; const r = range(q); return R.register(books, q.type || 'sales', r.from, r.to); });
-  app.get('/api/reports/sales-by', async (req) => { const q = req.query as Q; const r = range(q); return R.salesBy(books, q.by || 'party', r.from, r.to); });
+  app.get('/api/reports/register', async (req) => { const q = req.query as Q; const r = range(q); return R.register(books, q.type || 'sales', r.from, r.to, text(q.salesman)); });
+  app.get('/api/reports/sales-by', async (req) => { const q = req.query as Q; const r = range(q); return R.salesBy(books, q.by || 'party', r.from, r.to, {
+      salesman: text(q.salesman), beat: text(q.beat), partyId: num(q.partyId), itemId: num(q.itemId), stockGroupId: num(q.stockGroupId),
+    });
+  });
   app.get('/api/reports/godown-stock', async (req) => R.godownStock(books, asOf(req.query as Q)));
   app.get('/api/reports/scheme-claims', async (req) => { const r = range(req.query as Q); return R.schemeClaims(books, r.from, r.to); });
   app.get('/api/reports/brs/:ledgerId', async (req) => R.bankReconciliation(books, Number((req.params as Q).ledgerId), asOf(req.query as Q)));
@@ -275,11 +295,14 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const xml = body.xml ?? (await fetchTallyMasters(body.url || 'http://localhost:9000'));
     return importTallyMasters(books, parseTallyMasters(xml));
   });
-  app.post('/api/backup', async (req) => {
-    const dir = books.company().backup_dir || opts.defaultBackupDir;
-    if (!dir) throw new BooksError('Choose a backup folder in Company settings first.');
-    return backup(books, dir);
+  app.post('/api/backup', async () => {
+    if (!books.company().backup_dir && !opts.defaultBackupDir) throw new BooksError('Choose a backup folder in Company settings first.');
+    const r = await backupAll(books, opts.defaultBackupDir ?? '');
+    if (!r.local && !r.cloud) throw new BooksError(r.errors.join(' '));
+    return r;
   });
+  // Folders on this (main) PC that a cloud drive keeps in step with the internet, e.g. Google Drive for desktop.
+  app.get('/api/backup/cloud-folders', async () => cloudFolders());
   app.get('/api/audit', async () => books.auditLog());
   app.post('/api/client-error', { bodyLimit: 32 * 1024 }, async (req) => {
     const b = (req.body ?? {}) as { message?: string; stack?: string };
@@ -299,6 +322,55 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 }
 
 const maxDate = (a: string, b: string) => (a > b ? a : b);
+
+/** Folders a cloud drive app keeps in step with the internet on this PC (Google Drive first: it is free up to 15 GB). */
+export function cloudFolders(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } }) {
+  const found: { name: string; path: string }[] = [];
+  const add = (name: string, p: string | undefined) => { if (p && exists(p) && !found.some((f) => f.path === p)) found.push({ name, path: path.join(p, 'Stockwell Backups') }); };
+  if (process.platform === 'win32' || env.STOCKWELL_TEST_CLOUD) {
+    for (const d of 'DEFGHIJKLMNOPQRSTUVWXYZ') add('Google Drive', `${d}:\\My Drive`);
+  }
+  const home = env.USERPROFILE || env.HOME;
+  if (home) { add('Google Drive', path.join(home, 'Google Drive')); add('Google Drive', path.join(home, 'My Drive')); }
+  add('OneDrive', env.OneDrive);
+  if (home) add('Dropbox', path.join(home, 'Dropbox'));
+  return found;
+}
+
+/** Backs up to the backup folder (or Documents) and to the cloud folder, if one is set. One failing does not stop the other.
+ *  When each last worked, and what went wrong, is kept in the company record so every PC can show it. */
+export async function backupAll(books: Books, defaultDir: string) {
+  const c = books.company();
+  const errors: string[] = [];
+  const now = new Date().toISOString();
+  let local: string | null = null;
+  let cloud: string | null = null;
+  const localDir = c.backup_dir || defaultDir;
+  try { if (localDir) local = (await backup(books, localDir)).file; } catch (e) {
+    errors.push((e as Error).message);
+    // A pen drive that is not plugged in should not stop the copy: fall back to Documents.
+    if (defaultDir && localDir !== defaultDir) { try { local = (await backup(books, defaultDir)).file; } catch (e2) { errors.push((e2 as Error).message); } }
+  }
+  if (c.cloud_backup_dir && path.resolve(c.cloud_backup_dir) !== path.resolve(localDir || '.')) {
+    try { cloud = (await backup(books, c.cloud_backup_dir)).file; } catch (e) { errors.push(`Cloud folder: ${(e as Error).message}`); }
+  }
+  books.db.prepare(`UPDATE company SET last_backup=CASE WHEN @local THEN @now ELSE last_backup END,
+    last_cloud_backup=CASE WHEN @cloud THEN @now ELSE last_cloud_backup END, backup_error=@err WHERE id=1`)
+    .run({ local: local ? 1 : 0, cloud: cloud ? 1 : 0, now, err: errors.join(' ').slice(0, 500) });
+  return { local, cloud, errors };
+}
+
+/** Whether the automatic backup is due: every few hours as set (or once a day), counted from the last good copy. */
+export function backupDue(books: Books, now = new Date()): boolean {
+  const c = books.company();
+  if (!c.last_backup) return true;
+  const last = new Date(c.last_backup);
+  if (Number.isNaN(last.getTime())) return true;
+  const hours = Number(c.backup_every_hours) || 24; // 0 = once a day
+  // A missed cloud copy is tried again on the next round too.
+  const cloudBehind = !!c.cloud_backup_dir && (!c.last_cloud_backup || c.last_cloud_backup < c.last_backup);
+  return now.getTime() - last.getTime() >= hours * 3600_000 || (cloudBehind && now.getTime() - last.getTime() >= 15 * 60_000);
+}
 
 /** Copies the live database to a dated file and keeps the newest 30 copies. */
 export async function backup(books: Books, dir: string) {
@@ -323,7 +395,6 @@ export async function backup(books: Books, dir: string) {
   }
   fs.renameSync(part, file);
   prune(dir);
-  books.db.prepare(`UPDATE company SET last_backup=? WHERE id=1`).run(new Date().toISOString());
   return { file };
 }
 

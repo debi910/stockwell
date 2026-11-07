@@ -213,6 +213,11 @@ export function openDb(path: string): DB {
   db.exec(SCHEMA);
   migrate(db);
   seed(db);
+  // A ledger made before dates were kept (or one Stockwell made itself) is dated by its entry in the edit log,
+  // else the books start date. Runs after seeding, so a new company's own ledgers get a date too.
+  db.exec(`UPDATE ledgers SET created_on=COALESCE(
+      (SELECT date(MIN(a.at), '+330 minutes') FROM audit a WHERE a.entity='ledger' AND a.entity_id=ledgers.id AND a.action='create'),
+      (SELECT books_from FROM company WHERE id=1), '2026-04-01') WHERE created_on=''`);
   return db;
 }
 
@@ -297,6 +302,21 @@ function migrate(db: DB) {
       FROM tax_lines t JOIN ledgers l ON l.id=t.ledger_id WHERE t.taxability<>'outside';
   `);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS vouchers_client_key ON vouchers(client_key) WHERE client_key IS NOT NULL`);
+  // ---- v0.3: what the accounts staff asked for ----
+  add('items', 'opening_date', 'TEXT DEFAULT NULL'); // opening stock counts from this date; NULL = the books start date
+  add('ledgers', 'created_on', "TEXT NOT NULL DEFAULT ''");
+  add('vouchers', 'salesman', "TEXT NOT NULL DEFAULT ''"); // who made the sale or collected the money
+  add('company', 'cloud_backup_dir', "TEXT NOT NULL DEFAULT ''"); // e.g. the Google Drive folder on this PC
+  add('company', 'backup_every_hours', 'INTEGER NOT NULL DEFAULT 4'); // 0 = once a day
+  add('company', 'last_cloud_backup', "TEXT NOT NULL DEFAULT ''");
+  add('company', 'backup_error', "TEXT NOT NULL DEFAULT ''");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS salesmen (
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, phone TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '',
+      active INTEGER NOT NULL DEFAULT 1);
+    INSERT OR IGNORE INTO salesmen (name) SELECT DISTINCT TRIM(salesman) FROM ledgers WHERE TRIM(COALESCE(salesman,''))<>'';
+    CREATE INDEX IF NOT EXISTS vouchers_salesman ON vouchers(salesman) WHERE salesman<>'';
+  `);
   db.exec(`UPDATE vouchers SET party_gstin=COALESCE((SELECT gstin FROM ledgers WHERE id=vouchers.party_id),''),
     party_state=COALESCE(place_of_supply,'') WHERE party_gstin='' AND party_state='' AND party_id IS NOT NULL`);
 }

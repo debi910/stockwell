@@ -27,7 +27,7 @@
 </head>
 <body>
   <div class="card">
-    <h1>Set up Stockwell on this PC</h1>
+    <h1 id="title">Set up Stockwell on this PC</h1>
     <p>Choose once. The books live on one PC (the main PC). The other PC opens them over the office network, the same way TallyPrime works with two PCs.</p>
     <div class="err" id="err"></div>
     <div class="choices">
@@ -40,6 +40,11 @@
       <div class="note" id="status"></div>
     </div>
     <div class="note" id="lan"></div>
+    <div id="keepbox" style="display:none; margin-top: 16px;">
+      <button class="go" id="keep" style="margin-left:0">Keep as it is</button>
+      <div class="note">Changing the main PC? First make a backup on the old main PC (Gateway → Backup), choose "This is the main PC" here,
+        then restore that backup here (Backup → Restore). The books already on this PC are never deleted by this page.</div>
+    </div>
   </div>
 <script>
   const q = new URLSearchParams(location.search);
@@ -61,6 +66,16 @@
   document.getElementById('connect').onclick = connect;
   addr.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
   if (q.get('address')) document.getElementById('client').style.display = 'block';
+  // Opened again from inside Stockwell: show what this PC is now, and let it stay that way.
+  const current = q.get('current');
+  if (current === 'main' || current === 'client') {
+    document.getElementById('title').textContent = 'Change how this PC works';
+    document.getElementById(current === 'main' ? 'main' : 'other').style.borderColor = 'var(--amber)';
+    document.getElementById(current === 'main' ? 'main' : 'other').querySelector('b').textContent += ' (now)';
+    if (current === 'client') document.getElementById('client').style.display = 'block';
+    document.getElementById('keepbox').style.display = 'block';
+    document.getElementById('keep').onclick = () => api.choose(current, q.get('address') || undefined);
+  }
 </script>
 </body>
 </html>

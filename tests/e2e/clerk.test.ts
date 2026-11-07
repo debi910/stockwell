@@ -77,6 +77,7 @@ describe('the clerk at the counter', () => {
     await field('Name').fill('Sahu Kirana');
     await field('Name').press('Enter');
     await pick('Under', 'Sundry Debtors');
+    await expect.poll(focused).toBe('Ledger date'); // Enter on Under moves on by itself; let it land first
     await field('Address').focus();
     await page.keyboard.type('Grand Road');
     await page.keyboard.press('Enter');

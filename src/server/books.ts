@@ -74,13 +74,14 @@ export interface Company {
   ewb_threshold: number; udyam_no: string; msme_interest_rate: number; expiry_alert_days: number;
   invoice_terms: string; backup_dir: string; allow_negative_stock: number; last_backup: string;
   gst_filing: string; price_levels: string;
+  cloud_backup_dir: string; backup_every_hours: number; last_cloud_backup: string; backup_error: string;
 }
 
 export interface Group { id: number; name: string; parent_id: number | null; nature: Nature; direct: number; builtin: number }
 
 export interface Ledger {
   id: number; name: string; group_id: number; opening: number; gstin: string; state_code: string;
-  address: string; city: string; pincode: string; phone: string; credit_days: number; beat: string; salesman: string;
+  address: string; city: string; pincode: string; phone: string; credit_days: number; beat: string; salesman: string; created_on: string;
   msme_supplier: number; msme_buyer: number; udyam_no: string; tax_kind: string | null; builtin: number;
   credit_limit: number; block_overdue: number; price_level: string; assessable: number; tds_section: string; tds_rate: number;
 }
@@ -88,7 +89,7 @@ export interface Ledger {
 export interface Item {
   id: number; name: string; stock_group_id: number | null; unit_id: number; hsn: string; gst_rate: number;
   mrp: number; sale_rate: number; purchase_rate: number; track_batch: number; reorder_level: number;
-  scheme_buy: number; scheme_free: number; opening_qty: number; opening_value: number;
+  scheme_buy: number; scheme_free: number; opening_qty: number; opening_value: number; opening_date: string | null;
   taxability: 'taxable' | 'nil' | 'exempt' | 'nongst';
   alt_unit_id: number | null; alt_conv: number;
 }
@@ -134,6 +135,8 @@ export interface VoucherInput {
   /** Set by the screen once per voucher; a repeated save with the same key returns the first voucher. */
   clientKey?: string;
   narration?: string;
+  /** Who made the sale or collected the money. Left out: the party's own salesman (or, on an alteration, as before). */
+  salesman?: string;
   // item invoices
   partyId?: number;
   accountId?: number; // sales/purchase ledger for invoices; cash/bank ledger for receipt/payment/contra
@@ -173,10 +176,10 @@ export interface VoucherInput {
 const DEBTOR_GROUPS = ['Sundry Debtors', 'Sundry Creditors'];
 const LEDGER_COLS = ['name', 'group_id', 'opening', 'gstin', 'state_code', 'address', 'city', 'pincode', 'phone',
   'credit_days', 'beat', 'salesman', 'msme_supplier', 'msme_buyer', 'udyam_no',
-  'credit_limit', 'block_overdue', 'price_level', 'assessable', 'tds_section', 'tds_rate', 'tax_kind'] as const;
+  'credit_limit', 'block_overdue', 'price_level', 'assessable', 'tds_section', 'tds_rate', 'tax_kind', 'created_on'] as const;
 const NUMERIC_LEDGER_COLS: string[] = ['opening', 'credit_days', 'msme_supplier', 'msme_buyer', 'credit_limit', 'block_overdue', 'assessable', 'tds_rate'];
 const ITEM_COLS = ['name', 'stock_group_id', 'unit_id', 'hsn', 'gst_rate', 'mrp', 'sale_rate', 'purchase_rate', 'track_batch',
-  'reorder_level', 'scheme_buy', 'scheme_free', 'opening_qty', 'opening_value', 'taxability', 'alt_unit_id', 'alt_conv'] as const;
+  'reorder_level', 'scheme_buy', 'scheme_free', 'opening_qty', 'opening_value', 'taxability', 'alt_unit_id', 'alt_conv', 'opening_date'] as const;
 
 export class Books {
   constructor(public db: DB) {}
@@ -187,7 +190,8 @@ export class Books {
   }
 
   updateCompany(patch: Partial<Company>) {
-    const allowed = Object.keys(this.company()).filter((k) => k !== 'id');
+    // When the last backups ran is kept by Stockwell itself, never typed in.
+    const allowed = Object.keys(this.company()).filter((k) => !['id', 'last_backup', 'last_cloud_backup', 'backup_error'].includes(k));
     const keys = Object.keys(patch).filter((k) => allowed.includes(k));
     if (patch.gstin && !isValidGstin(patch.gstin)) fail('The company GSTIN is not valid. Check the 15 characters.');
     if (patch.gstin) patch.state_code = stateFromGstin(patch.gstin) ?? patch.state_code;
@@ -203,6 +207,11 @@ export class Books {
     }
     if (patch.gst_filing !== undefined && !['monthly', 'quarterly'].includes(String(patch.gst_filing))) fail('GST filing must be monthly or quarterly.');
     if (patch.price_levels !== undefined) patch.price_levels = String(patch.price_levels ?? '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 10).join(', ');
+    if (patch.backup_every_hours !== undefined && ![0, 1, 2, 4, 8, 12].includes(Number(patch.backup_every_hours))) fail('Back up every 1, 2, 4, 8 or 12 hours, or 0 for once a day.');
+    for (const k of ['backup_dir', 'cloud_backup_dir'] as const) {
+      if (patch[k] !== undefined && typeof patch[k] !== 'string') fail('A backup folder must be a folder path.');
+      if (patch[k]) patch[k] = String(patch[k]).trim();
+    }
     if (patch.allow_negative_stock !== undefined) patch.allow_negative_stock = patch.allow_negative_stock ? 1 : 0;
     if (patch.msme_interest_rate !== undefined && !(Number(patch.msme_interest_rate) >= 0 && Number(patch.msme_interest_rate) <= 100)) fail('Enter the MSME interest rate as a yearly percentage, e.g. 16.5.');
     this.db.prepare(`UPDATE company SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE id=1`).run(patch);
@@ -273,7 +282,7 @@ export class Books {
   private cleanLedger(input: Partial<Ledger>): Partial<Ledger> {
     if (!input || typeof input !== 'object') fail('The ledger details are missing.');
     const l: Partial<Ledger> = { ...input };
-    for (const k of ['name', 'gstin', 'phone', 'email', 'address', 'pan', 'state_code', 'price_level', 'tds_section'] as const) {
+    for (const k of ['name', 'gstin', 'phone', 'email', 'address', 'pan', 'state_code', 'price_level', 'tds_section', 'beat', 'salesman', 'created_on'] as const) {
       const v = (l as Record<string, unknown>)[k];
       if (v !== undefined && v !== null && typeof v !== 'string') fail(`The ledger's ${k.replace('_', ' ')} must be text.`);
     }
@@ -307,6 +316,13 @@ export class Books {
       if (l.price_level && !this.priceLevels().includes(l.price_level)) fail(`There is no price level "${l.price_level}". Add it in Company Features (F11) first.`);
     }
     if (l.tds_section !== undefined) l.tds_section = String(l.tds_section ?? '').trim().slice(0, 20);
+    if (l.beat !== undefined) l.beat = String(l.beat ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (l.salesman !== undefined) l.salesman = String(l.salesman ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    // The ledger's date (when it was opened with the firm). Blank on an alteration keeps the old date.
+    if (l.created_on !== undefined) {
+      if (!l.created_on) delete l.created_on;
+      else l.created_on = isoDate(l.created_on, 'The ledger date')!;
+    }
     // Users may mark their own TDS/TCS ledgers; the GST and round-off ledgers are Stockwell's own.
     if (l.tax_kind !== undefined) {
       const k = String(l.tax_kind ?? '');
@@ -333,7 +349,9 @@ export class Books {
     for (const c of cols) row[c] = (l as Record<string, unknown>)[c] ?? (c === 'tax_kind' ? null : NUMERIC_LEDGER_COLS.includes(c) ? 0 : '');
     row.msme_supplier = row.msme_supplier ? 1 : 0;
     row.msme_buyer = row.msme_buyer ? 1 : 0;
+    if (!row.created_on) row.created_on = todayISO();
     return this.db.transaction(() => {
+      row.salesman = this.ensureSalesman(row.salesman as string);
       const r = this.db.prepare(`INSERT INTO ledgers (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`).run(row);
       const id = Number(r.lastInsertRowid);
       this.syncOpeningBill(id);
@@ -356,12 +374,94 @@ export class Books {
         for (const k of keys) row[k] = (l as Record<string, unknown>)[k];
         if ('msme_supplier' in row) row.msme_supplier = row.msme_supplier ? 1 : 0;
         if ('msme_buyer' in row) row.msme_buyer = row.msme_buyer ? 1 : 0;
+        if ('salesman' in row) row.salesman = this.ensureSalesman(row.salesman as string);
         this.db.prepare(`UPDATE ledgers SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE id=@id`).run(row);
       }
       this.syncOpeningBill(id);
       this.audit('ledger', id, 'update', { before, patch });
       return this.ledger(id);
     })();
+  }
+
+  // ---------- salesmen ----------
+  salesmen() {
+    return this.db.prepare(`
+      SELECT s.*, (SELECT COUNT(*) FROM ledgers l WHERE l.salesman=s.name COLLATE NOCASE) AS parties,
+        (SELECT COUNT(*) FROM vouchers v WHERE v.salesman=s.name COLLATE NOCASE) AS vouchers
+      FROM salesmen s ORDER BY s.active DESC, s.name`).all() as { id: number; name: string; phone: string; area: string; active: number; parties: number; vouchers: number }[];
+  }
+
+  salesman(id: number) {
+    const s = this.db.prepare(`SELECT * FROM salesmen WHERE id=?`).get(id) as { id: number; name: string; phone: string; area: string; active: number } | undefined;
+    return s ?? fail(`Salesman ${id} not found.`);
+  }
+
+  private cleanSalesman(input: Record<string, unknown>, partial: boolean) {
+    if (!input || typeof input !== 'object') fail('The salesman details are missing.');
+    for (const k of ['name', 'phone', 'area'] as const) {
+      if (input[k] !== undefined && input[k] !== null && typeof input[k] !== 'string') fail(`The salesman's ${k} must be text.`);
+    }
+    const out: { name?: string; phone?: string; area?: string; active?: number } = {};
+    if (input.name !== undefined || !partial) {
+      out.name = String(input.name ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      if (!out.name) fail('Salesman name is required.');
+    }
+    if (input.phone !== undefined) out.phone = String(input.phone ?? '').replace(/[^\d+]/g, '').slice(0, 15);
+    if (input.area !== undefined) out.area = String(input.area ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (input.active !== undefined) out.active = input.active ? 1 : 0;
+    return out;
+  }
+
+  createSalesman(input: Record<string, unknown>) {
+    const s = this.cleanSalesman(input, false);
+    if (this.db.prepare(`SELECT 1 FROM salesmen WHERE name=? COLLATE NOCASE`).get(s.name)) fail(`A salesman named "${s.name}" already exists.`);
+    return this.db.transaction(() => {
+      const r = this.db.prepare(`INSERT INTO salesmen (name, phone, area, active) VALUES (?, ?, ?, ?)`).run(s.name, s.phone ?? '', s.area ?? '', s.active ?? 1);
+      const id = Number(r.lastInsertRowid);
+      this.audit('salesman', id, 'create', s);
+      return this.salesman(id);
+    })();
+  }
+
+  /** A new name is carried to the parties and vouchers of that salesman, so reports keep them together. */
+  updateSalesman(id: number, patch: Record<string, unknown>) {
+    const before = this.salesman(id);
+    const s = this.cleanSalesman(patch, true);
+    if (s.name && s.name.toLowerCase() !== before.name.toLowerCase() && this.db.prepare(`SELECT 1 FROM salesmen WHERE name=? COLLATE NOCASE`).get(s.name)) {
+      fail(`A salesman named "${s.name}" already exists.`);
+    }
+    return this.db.transaction(() => {
+      const keys = Object.keys(s) as (keyof typeof s)[];
+      if (keys.length) this.db.prepare(`UPDATE salesmen SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE id=@id`).run({ ...s, id });
+      if (s.name && s.name !== before.name) {
+        this.db.prepare(`UPDATE ledgers SET salesman=? WHERE salesman=? COLLATE NOCASE`).run(s.name, before.name);
+        this.db.prepare(`UPDATE vouchers SET salesman=? WHERE salesman=? COLLATE NOCASE`).run(s.name, before.name);
+      }
+      this.audit('salesman', id, 'update', { before, patch: s });
+      return this.salesman(id);
+    })();
+  }
+
+  deleteSalesman(id: number) {
+    const s = this.salesman(id);
+    const used = this.db.prepare(`SELECT (SELECT COUNT(*) FROM vouchers WHERE salesman=? COLLATE NOCASE) + (SELECT COUNT(*) FROM ledgers WHERE salesman=? COLLATE NOCASE) n`).get(s.name, s.name) as { n: number };
+    if (used.n) fail(`"${s.name}" is on parties or vouchers, so the name must stay for the reports. Mark the salesman as not active instead.`);
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM salesmen WHERE id=?`).run(id);
+      this.audit('salesman', id, 'delete', s);
+    })();
+    return { ok: true };
+  }
+
+  /** The salesman's name as kept in the list (a new name is added to the list). Blank stays blank. */
+  ensureSalesman(name: string | undefined | null): string {
+    const n = String(name ?? '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    if (!n) return '';
+    const s = this.db.prepare(`SELECT name FROM salesmen WHERE name=? COLLATE NOCASE`).get(n) as { name: string } | undefined;
+    if (s) return s.name;
+    const r = this.db.prepare(`INSERT INTO salesmen (name) VALUES (?)`).run(n);
+    this.audit('salesman', Number(r.lastInsertRowid), 'create', { name: n });
+    return n;
   }
 
   deleteLedger(id: number) {
@@ -557,6 +657,14 @@ export class Books {
       if (i[k] !== undefined && i[k] !== null && Number(i[k]) > (qtyField ? 1e7 : 1e13)) fail(`That ${qtyField ? 'quantity' : 'amount'} is too large.`);
     }
     if (i.opening_value !== undefined && i.opening_value !== null) i.opening_value = Math.round(Number(i.opening_value));
+    // The date the opening stock was counted. Blank = the books start date. Stock before it does not include it.
+    if (i.opening_date !== undefined) {
+      if (i.opening_date !== null && typeof i.opening_date !== 'string') fail('The opening stock date must be a date.');
+      const d = isoDate(i.opening_date, 'The opening stock date');
+      const from = this.company().books_from;
+      if (d && d < from) fail(`The opening stock date cannot be before the books start on ${shortDate(from)}.`);
+      i.opening_date = d && d > from ? d : null;
+    }
     if (i.unit_id !== undefined && !this.db.prepare(`SELECT 1 FROM units WHERE id=?`).get(i.unit_id)) fail('Choose a unit for the item.');
     if (i.alt_unit_id) {
       if (!this.db.prepare(`SELECT 1 FROM units WHERE id=?`).get(i.alt_unit_id)) fail('Choose the alternate unit from the list.');
@@ -571,7 +679,7 @@ export class Books {
     if (this.db.prepare(`SELECT id FROM items WHERE name=?`).get(name)) fail(`An item named "${name}" already exists.`);
     const cols = ITEM_COLS;
     const row: Record<string, unknown> = {};
-    for (const c of cols) row[c] = (input as Record<string, unknown>)[c] ?? (c === 'stock_group_id' || c === 'alt_unit_id' ? null : c === 'hsn' ? '' : c === 'taxability' ? (Number(input.gst_rate) > 0 ? 'taxable' : 'nil') : 0);
+    for (const c of cols) row[c] = (input as Record<string, unknown>)[c] ?? (c === 'stock_group_id' || c === 'alt_unit_id' || c === 'opening_date' ? null : c === 'hsn' ? '' : c === 'taxability' ? (Number(input.gst_rate) > 0 ? 'taxable' : 'nil') : 0);
     if (!row.alt_unit_id) { row.alt_unit_id = null; row.alt_conv = 0; }
     row.name = name;
     row.track_batch = row.track_batch ? 1 : 0;
@@ -594,7 +702,11 @@ export class Books {
     if (!patch || typeof patch !== 'object') fail('The item details are missing.');
     const before = this.item(id);
     const keys = Object.keys(patch).filter((k) => (ITEM_COLS as readonly string[]).includes(k));
-    this.checkItem({ ...patch, unit_id: patch.unit_id ?? before.unit_id, alt_unit_id: 'alt_unit_id' in patch ? patch.alt_unit_id : before.alt_unit_id, alt_conv: patch.alt_conv ?? before.alt_conv });
+    const checked: Partial<Item> = { ...patch, unit_id: patch.unit_id ?? before.unit_id, alt_unit_id: 'alt_unit_id' in patch ? patch.alt_unit_id : before.alt_unit_id, alt_conv: patch.alt_conv ?? before.alt_conv };
+    this.checkItem(checked);
+    // Keep what the check tidied up (rounded value, opening date as a real date or none).
+    patch = { ...patch };
+    for (const k of ['opening_value', 'opening_date', 'hsn'] as const) if (k in patch) (patch as Record<string, unknown>)[k] = checked[k];
     if ('alt_unit_id' in patch && !patch.alt_unit_id) { patch.alt_unit_id = null; patch.alt_conv = 0; if (!keys.includes('alt_conv')) keys.push('alt_conv'); }
     if (patch.name !== undefined) {
       patch.name = String(patch.name).trim() || fail('Item name is required.');
@@ -625,12 +737,14 @@ export class Books {
 
   /** Batches of an item with the quantity left, soonest expiry first (FEFO). */
   batches(itemId: number, asOf = '9999-12-31', excludeVoucher = 0, godownId: number | null = null) {
-    // Opening stock sits in the Main Location (godown 1).
+    // Opening stock sits in the Main Location (godown 1), from the item's opening date.
+    const od = (this.db.prepare(`SELECT opening_date FROM items WHERE id=?`).get(itemId) as { opening_date: string | null } | undefined)?.opening_date;
+    const op = !od || od <= asOf ? 1 : 0;
     return this.db.prepare(`
-      SELECT b.*, (CASE WHEN @g IS NULL OR @g=1 THEN b.opening_qty ELSE 0 END) + COALESCE((
+      SELECT b.*, (CASE WHEN @op=1 AND (@g IS NULL OR @g=1) THEN b.opening_qty ELSE 0 END) + COALESCE((
         SELECT SUM(iv.direction * (iv.qty + iv.free_qty)) FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id
         WHERE iv.batch_id=b.id AND v.cancelled=0 AND v.optional=0 AND v.date<=@asOf AND v.id<>@ex AND (@g IS NULL OR COALESCE(iv.godown_id,1)=@g)), 0) AS qty
-      FROM batches b WHERE b.item_id=@item ORDER BY COALESCE(b.expiry_date,'9999-12-31'), b.id`).all({ asOf, ex: excludeVoucher, item: itemId, g: godownId }) as
+      FROM batches b WHERE b.item_id=@item ORDER BY COALESCE(b.expiry_date,'9999-12-31'), b.id`).all({ asOf, ex: excludeVoucher, item: itemId, g: godownId, op }) as
       { id: number; batch_no: string; expiry_date: string | null; mfg_date: string | null; mrp: number; qty: number }[];
   }
 
@@ -817,7 +931,7 @@ export class Books {
     const lows = new Map<string, { min: number; date: string; what: string }>();
     const note = (key: string, min: number, date: string, what: string) => lows.set(key, { min, date, what });
     for (const itemId of new Set(itemIds)) {
-      const item = this.db.prepare(`SELECT id, name, opening_qty FROM items WHERE id=?`).get(itemId) as { id: number; name: string; opening_qty: number } | undefined;
+      const item = this.db.prepare(`SELECT id, name, opening_qty, opening_date FROM items WHERE id=?`).get(itemId) as { id: number; name: string; opening_qty: number; opening_date: string | null } | undefined;
       if (!item) continue;
       const runs = (partition: string, select: string) => this.db.prepare(`
         SELECT k, date, SUM(delta) OVER (PARTITION BY k ORDER BY date) AS run FROM (
@@ -829,7 +943,8 @@ export class Books {
         const seen = new Set<string>();
         for (const r of rows) {
           const key = `${prefix}|${itemId}|${r.k}`;
-          const q = Math.round((opening(r.k) + r.run) * 1000) / 1000;
+          // Opening stock is there only from its own date: goods sold before it was counted would go below zero.
+          const q = Math.round(((!item.opening_date || r.date >= item.opening_date ? opening(r.k) : 0) + r.run) * 1000) / 1000;
           const cur = lows.get(key);
           if (!seen.has(key)) { seen.add(key); note(key, Math.min(0, q), q < 0 ? r.date : '', label(r.k)); continue; }
           if (cur && q < cur.min) note(key, q, cur.date || r.date, label(r.k));
@@ -960,7 +1075,7 @@ export class Books {
       SELECT COALESCE(SUM(iv.direction * (iv.qty + iv.free_qty)), 0) q FROM inventory iv JOIN vouchers v ON v.id=iv.voucher_id
       WHERE iv.item_id=@item AND v.cancelled=0 AND v.optional=0 AND v.date<=@date AND v.id<>@ex AND (@g IS NULL OR COALESCE(iv.godown_id,1)=@g)`)
       .get({ item: itemId, date, ex: excludeVoucher, g: godownId }) as { q: number };
-    const opening = godownId === null || godownId === 1 ? item.opening_qty : 0;
+    const opening = (godownId === null || godownId === 1) && (!item.opening_date || item.opening_date <= date) ? item.opening_qty : 0;
     return Math.round((opening + r.q) * 1000) / 1000;
   }
 
@@ -1400,6 +1515,15 @@ export class Books {
     }
 
     const pdc = !!input.pdc && !vt.inventory && !vt.stock;
+    let salesman: string;
+    if (input.salesman !== undefined && input.salesman !== null) {
+      if (typeof input.salesman !== 'string') fail('The salesman must be text.');
+      const n = input.salesman.trim().replace(/\s+/g, ' ');
+      const found = n ? this.db.prepare(`SELECT name FROM salesmen WHERE name=? COLLATE NOCASE`).get(n) as { name: string } | undefined : undefined;
+      if (n && !found) fail(`There is no salesman "${n}". Add the name first (Create → Salesman).`);
+      salesman = found?.name ?? '';
+    } else if (existing) salesman = (existing as { salesman?: string }).salesman ?? '';
+    else salesman = header.party_id ? (this.db.prepare(`SELECT salesman FROM ledgers WHERE id=?`).get(header.party_id) as { salesman: string } | undefined)?.salesman ?? '' : '';
     const row = {
       type, number: numbering.number, seq: numbering.seq, date: input.date, narration: input.narration ?? '',
       party_id: header.party_id ?? null, account_id: header.account_id ?? null, place_of_supply: header.place_of_supply ?? null,
@@ -1410,7 +1534,7 @@ export class Books {
       party_gstin: snapshot.gstin, party_state: snapshot.state,
       mode, optional: optional ? 1 : 0, pdc: pdc ? 1 : 0, cheque_no: (input.chequeNo ?? '').trim().slice(0, 20),
       cheque_date: isoDate(input.chequeDate, 'The cheque date'), bank_name: (input.bankName ?? '').trim().slice(0, 60),
-      against_id: againstId, charges: header.charges ?? 0,
+      against_id: againstId, charges: header.charges ?? 0, salesman,
     };
     let id: number;
     if (existing) {
@@ -1496,15 +1620,16 @@ export class Books {
     return { ...v!, entries, lines, bills, taxLines, charges, against, followers };
   }
 
-  vouchers(opts: { from?: string; to?: string; type?: string; ledgerId?: number } = {}) {
+  vouchers(opts: { from?: string; to?: string; type?: string; ledgerId?: number; salesman?: string } = {}) {
     const where = ['1=1'];
     const args: unknown[] = [];
     if (opts.from) { where.push('v.date>=?'); args.push(opts.from); }
     if (opts.to) { where.push('v.date<=?'); args.push(opts.to); }
     if (opts.type) { where.push('v.type=?'); args.push(opts.type); }
     if (opts.ledgerId) { where.push('v.id IN (SELECT voucher_id FROM entries WHERE ledger_id=?)'); args.push(opts.ledgerId); }
+    if (opts.salesman) { where.push('v.salesman=? COLLATE NOCASE'); args.push(opts.salesman); }
     return this.db.prepare(`
-      SELECT v.id, v.type, v.number, v.date, v.total, v.cancelled, v.optional, v.pdc, v.bank_date, v.bounced_by, v.bounce_of, v.cheque_no, v.mode, v.narration, v.ewb_no, v.party_id,
+      SELECT v.id, v.type, v.number, v.date, v.total, v.cancelled, v.optional, v.pdc, v.bank_date, v.bounced_by, v.bounce_of, v.cheque_no, v.mode, v.narration, v.ewb_no, v.party_id, v.salesman,
         COALESCE(p.name, a.name, (SELECT l.name FROM entries e JOIN ledgers l ON l.id=e.ledger_id WHERE e.voucher_id=v.id ORDER BY e.id LIMIT 1)) AS particulars
       FROM vouchers v LEFT JOIN ledgers p ON p.id=v.party_id LEFT JOIN ledgers a ON a.id=v.account_id
       WHERE ${where.join(' AND ')} ORDER BY v.date, v.id`).all(...args);
@@ -1518,7 +1643,9 @@ export class Books {
     let filter = '';
     if (opts.ledgerId) { filter = 'AND b.ledger_id=?'; args.push(opts.ledgerId); }
     const rows = this.db.prepare(`
-      SELECT b.ledger_id, l.name AS ledger_name, l.phone, l.beat, l.salesman, l.credit_days, l.msme_buyer, l.msme_supplier,
+      SELECT b.ledger_id, l.name AS ledger_name, l.phone, l.beat, l.credit_days, l.msme_buyer, l.msme_supplier,
+        -- the salesman of the bill itself, else the party's own
+        COALESCE(NULLIF(MAX(CASE WHEN b.kind='new' THEN (SELECT bv.salesman FROM vouchers bv WHERE bv.id=b.voucher_id) END),''), l.salesman, '') AS salesman,
         b.ref, SUM(b.amount) AS pending,
         MIN(CASE WHEN b.kind='new' THEN b.date END) AS bill_date,
         MIN(CASE WHEN b.kind='new' THEN b.due_date END) AS due_date,

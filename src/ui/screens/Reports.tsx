@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { api, openWhatsApp } from '../api';
 import { isOwner, useKeyBar, useNav, useScreenKeys, useTitle, useBooksVersion, reportList } from '../nav';
 import { confirmBox } from '../components/Dialog';
@@ -21,6 +21,19 @@ export function useRows<T>(rows: T[], open: (r: T) => void, onEsc?: () => boolea
     document.querySelector('.main > div:not([style*="none"]) tr.sel')?.scrollIntoView?.({ block: 'nearest' });
   }, [sel]);
   return { sel, setSel };
+}
+
+/** A salesman pick list for a report's toolbar (shown once the firm has salesmen). Returns the chosen name ('' = all). */
+export function useSalesmanFilter(): [string, ReactElement | null] {
+  const [list, setList] = useState<string[]>([]);
+  const [v, setV] = useState('');
+  useEffect(() => { api.get('/api/salesmen').then((r: any[]) => setList(r.map((x) => x.name))).catch(() => {}); }, []);
+  const el = list.length ? (
+    <select className="f" aria-label="Salesman filter" style={{ width: 170, background: 'var(--paper)', border: '1px solid var(--line)' }} value={v} onChange={(e) => setV(e.target.value)}>
+      <option value="">All salesmen</option>{list.map((n) => <option key={n}>{n}</option>)}
+    </select>
+  ) : null;
+  return [v, el];
 }
 
 /** A "From – To" period picker (F2 in Tally) shown in the report toolbar. */
@@ -64,10 +77,12 @@ export function DayBook({ active }: { active: boolean }) {
   const nav = useNav();
   const [range, setRange] = useState({ from: nav.workDate, to: nav.workDate });
   const [rows, setRows] = useState<any[]>([]);
-  useTitle('Day Book');
-  useEffect(() => { if (active) api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows); }, [active, useBooksVersion(), range]);
+  const [salesman, salesmanBox] = useSalesmanFilter();
+  useTitle(salesman ? `Day Book · ${salesman}` : 'Day Book');
+  const dayBookUrl = `/api/reports/day-book?from=${range.from}&to=${range.to}${salesman ? `&salesman=${encodeURIComponent(salesman)}` : ''}`;
+  useEffect(() => { if (active) api.get(dayBookUrl).then(setRows); }, [active, useBooksVersion(), dayBookUrl]);
   const { sel, setSel } = useRows(rows, (r) => nav.push({ name: 'voucher', props: { type: r.type, id: r.id } }));
-  const reload = () => api.get(`/api/reports/day-book?from=${range.from}&to=${range.to}`).then(setRows);
+  const reload = () => api.get(dayBookUrl).then(setRows);
   const cur = rows[sel];
   // TallyPrime's Day Book keys: Alt+2 duplicate, Alt+X cancel, Alt+D delete the selected voucher.
   const act = async (what: 'dup' | 'cancel' | 'delete') => {
@@ -95,7 +110,7 @@ export function DayBook({ active }: { active: boolean }) {
   const total = rows.filter((r) => !r.cancelled && !r.optional && BOOK_TYPES.includes(r.type)).reduce((a, r) => a + r.total, 0);
   return (
     <div className="report">
-      <div className="toolbar"><Period from={range.from} to={range.to} onChange={(from, to) => setRange({ from, to })} /><span className="subtle">{rows.length} vouchers</span></div>
+      <div className="toolbar"><Period from={range.from} to={range.to} onChange={(from, to) => setRange({ from, to })} />{salesmanBox}<span className="subtle">{rows.length} vouchers</span></div>
       <table className="r">
         <thead><tr><th>Date</th><th>Particulars</th><th>Vch type</th><th>Vch no.</th><th className="num">Amount</th></tr></thead>
         <tbody>
@@ -396,8 +411,10 @@ export function Outstanding({ kind, active }: { kind: 'receivable' | 'payable'; 
   const [beat, setBeat] = useState('');
   useTitle(kind === 'receivable' ? 'Bills Receivable' : 'Bills Payable');
   useEffect(() => { if (active) api.get(`/api/reports/outstanding?kind=${kind}&asOf=${nav.workDate}`).then(setRows); }, [active, useBooksVersion(), kind, nav.workDate]);
-  const beats = [...new Set(rows.map((r) => r.beat).filter(Boolean))];
-  const shown = rows.filter((r) => !beat || r.beat === beat);
+  const [salesman, setSalesman] = useState('');
+  const beats = [...new Set(rows.map((r) => r.beat).filter(Boolean))].sort();
+  const salesmen = [...new Set(rows.map((r) => r.salesman).filter(Boolean))].sort();
+  const shown = rows.filter((r) => (!beat || r.beat === beat) && (!salesman || r.salesman === salesman));
   const { sel, setSel } = useRows(shown, (r: any) => nav.push({ name: 'ledger-report', props: { id: r.ledger_id } }));
   const remind = async (ledgerId: number) => {
     const m = await api.get(`/api/reports/reminder/${ledgerId}`);
@@ -413,16 +430,19 @@ export function Outstanding({ kind, active }: { kind: 'receivable' | 'payable'; 
     <div className="report">
       <div className="toolbar">
         {beats.length > 0 && <select className="f" aria-label="Beat" style={{ width: 200, background: 'var(--paper)', border: '1px solid var(--line)' }} value={beat} onChange={(e) => setBeat(e.target.value)}>
-          <option value="">All beats</option>{beats.map((b) => <option key={b}>{b}</option>)}
+          <option value="">All areas</option>{beats.map((b) => <option key={b}>{b}</option>)}
+        </select>}
+        {salesmen.length > 0 && <select className="f" aria-label="Salesman filter" style={{ width: 200, background: 'var(--paper)', border: '1px solid var(--line)' }} value={salesman} onChange={(e) => setSalesman(e.target.value)}>
+          <option value="">All salesmen</option>{salesmen.map((b) => <option key={b}>{b}</option>)}
         </select>}
         <span className="subtle">{shown.length} bills · ₹{formatINR(Math.abs(total))}</span>
       </div>
       <table className="r">
-        <thead><tr><th>Date</th><th>Ref. no.</th><th>Party</th><th>Beat</th><th className="num">Pending</th><th>Due on</th><th className="num">Overdue by</th><th /></tr></thead>
+        <thead><tr><th>Date</th><th>Ref. no.</th><th>Party</th><th>Area</th><th>Salesman</th><th className="num">Pending</th><th>Due on</th><th className="num">Overdue by</th><th /></tr></thead>
         <tbody>
           {shown.map((r, i) => (
             <tr key={`${r.ledger_id}-${r.ref}`} className={`click ${i === sel ? 'sel' : ''}`} onClick={() => setSel(i)} onDoubleClick={() => nav.push({ name: 'ledger-report', props: { id: r.ledger_id } })}>
-              <td>{shortDate(r.bill_date)}</td><td>{r.ref}</td><td>{r.ledger_name}</td><td>{r.beat}</td>
+              <td>{shortDate(r.bill_date)}</td><td>{r.ref}</td><td>{r.ledger_name}</td><td>{r.beat}</td><td>{r.salesman}</td>
               <td className="num">{formatINR(Math.abs(r.pending))}</td><td>{shortDate(r.due_date)}</td>
               <td className="num">{r.overdue_days > 0 ? <span className={`tag ${r.overdue_days > 30 ? 'bad' : 'warn'}`}>{r.overdue_days} days</span> : ''}</td>
               <td>{kind === 'receivable' && <button className="btn small wa" onClick={(e) => { e.stopPropagation(); remind(r.ledger_id); }}>Remind</button>}</td>

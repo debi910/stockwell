@@ -94,7 +94,7 @@ export async function invoiceHtml(books: Books, voucherId: number): Promise<stri
     <div class="box"><div class="label">Details</div>
       Place of supply: ${esc(STATES[v.place_of_supply] ?? '')} (${esc(v.place_of_supply)})<br>
       ${v.vehicle_no ? `Vehicle: ${esc(v.vehicle_no)}<br>` : ''}${v.ewb_no ? `e-Way Bill: ${esc(v.ewb_no)}<br>` : ''}
-      ${party?.beat ? `Beat: ${esc(party.beat)}<br>` : ''}${v.ref_no ? `Ref: ${esc(v.ref_no)}<br>` : ''}
+      ${party?.beat ? `Area: ${esc(party.beat)}<br>` : ''}${v.salesman ? `Salesman: ${esc(String(v.salesman))}<br>` : ''}${v.ref_no ? `Ref: ${esc(v.ref_no)}<br>` : ''}
     </div>
   </div>
   <table>
